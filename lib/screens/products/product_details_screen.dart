@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../models/product.dart';
 import '../../models/stock_movement.dart';
+import '../../models/purchase_price.dart';
 import '../../services/inventory_service.dart';
 import '../../services/product_service.dart';
 import '../../widgets/confirm_product_delete.dart';
@@ -122,6 +123,25 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                         _ProductField('SKU', product.sku),
                         _ProductField('Danh mục', product.category),
                         _ProductField('Giá bán', product.formattedPrice),
+                        _ProductField(
+                          'Giá nhập',
+                          product.purchasePrice == null
+                              ? 'Chưa khai báo'
+                              : formatVnd(product.purchasePrice!.vnd),
+                        ),
+                        if (product.purchasePrice case final purchase?) ...[
+                          _ProductField(
+                            'Giá nhập gốc',
+                            '${purchase.original} ${purchase.currency}',
+                          ),
+                          if (purchase.currency == 'USD') ...[
+                            _ProductField(
+                              'Tỷ giá đã dùng',
+                              '1 USD = ${purchase.rate} VND',
+                            ),
+                            _ProductField('Ngày tỷ giá', purchase.rateDate!),
+                          ],
+                        ],
                         _ProductField('Số lượng tồn', '${product.quantity}'),
                         _ProductField(
                           'Mức tồn tối thiểu',

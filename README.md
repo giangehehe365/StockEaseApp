@@ -151,3 +151,134 @@ Các file thay đổi trong đợt Dashboard:
 Đợt này không sửa Authentication, service, database hoặc Firestore Rules. Các kiểm thử navigation dùng Firestore test double để chạy cả StockShell lẫn các màn hình thật; việc mô phỏng dữ liệu cập nhật không thay thế kiểm tra Firebase và nhập/xuất trên Android. Trường hợp Firebase còn dùng Rules cũ vẫn cần áp dụng Rules từ đợt Inventory trước.
 
 Kết quả kiểm tra đợt Dashboard: **27 Flutter test đều đạt**, `flutter analyze --no-pub` báo **No issues found**, và `dart format --output=none --set-exit-if-changed` xác nhận cả 7 file Dart thay đổi đã đúng định dạng. Chưa chạy thử bản cập nhật Dashboard trên thiết bị Android thật/emulator Android.
+
+## Currency Exchange Integration — Giá nhập USD/VND
+
+`price` là **giá bán VND** của sản phẩm và giữ nguyên ý nghĩa đó. Tính năng này bổ sung giá nhập riêng vào form Thêm/Sửa hiện có; không đổi số lượng tồn khi chỉnh sửa, không tạo giao dịch kho hoặc thay đổi báo cáo dựa trên giá bán. Firestore vẫn là database hiện tại, không có migration/xóa dữ liệu cũ.
+
+### REST API thực tế
+
+Sử dụng [Frankfurter v2](https://frankfurter.dev/), package `http` và HTTP GET:
+
+```http
+GET https://api.frankfurter.dev/v2/rate/USD/VND
+Accept: application/json
+```
+
+Endpoint đã được kiểm tra trực tiếp ngày 08/11/2026 và trả **HTTP 200**:
+
+```json
+{"date":"2026-11-08","base":"USD","quote":"VND","rate":25648}
+```
+
+Đây là snapshot phục vụ báo cáo, không phải tỷ giá được cố định trong ứng dụng. Code luôn đọc `rate` từ response. Service kiểm tra status 200, JSON object, `base == USD`, `quote == VND`, rate hữu hạn/lớn hơn 0 và ngày lịch hợp lệ. Timeout 12 giây; lỗi HTTP, JSON, mạng hoặc timeout có thông báo và Retry, không dùng tỷ giá dự phòng giả.
+
+### Sử dụng và quy đổi
+
+Mở **Thêm/Sửa sản phẩm → Giá nhập (Purchase Price)**. Phần này thu gọn được để giữ form gọn. Tiền tệ mặc định VND; không gọi API và tỷ giá lưu bằng 1. VND nhập số nguyên không có dấu phân cách nghìn. USD cho tối đa hai chữ số lẻ, dùng dấu chấm hoặc phẩy thập phân.
+
+Chọn USD để lấy tỷ giá, xem ngày tỷ giá và giá nhập quy đổi. Thay đổi số tiền chỉ tính lại trên máy, không gọi API theo từng ký tự. Nút **Làm mới tỷ giá** gọi GET mới; khi đang tải hoặc có lỗi, form không cho lưu giá USD chưa hợp lệ. Có thể Retry hoặc chuyển về VND. Response đến muộn sau khi đổi tiền tệ/đóng form không được áp dụng.
+
+```text
+purchasePriceVnd = round(purchasePriceOriginal × exchangeRate)
+```
+
+Làm tròn đến đồng gần nhất; với số không âm, phần lẻ 0,5 làm tròn lên. Form hiển thị tiền Việt có dấu chấm phân cách nghìn và dialog xác nhận giá gốc, tỷ giá/ngày tỷ giá (USD), giá nhập VND, giá bán trước khi lưu. Tất cả số tiền được giới hạn theo mức tối đa hiện có của sản phẩm.
+
+Khi Edit một giá nhập USD đã lưu, form khôi phục **tỷ giá lịch sử đã dùng**, không tự lấy tỷ giá mới làm thay đổi giá nhập. Muốn đổi tỷ giá thì nhấn Làm mới. Product Details hiển thị giá nhập VND, số tiền gốc, tiền tệ và thông tin tỷ giá đã lưu. Sản phẩm cũ hiển thị “Chưa khai báo”, vẫn sửa được khi bỏ trống giá nhập; không tự backfill hoặc ghi đè dữ liệu cũ.
+
+### Các trường Firestore bổ sung
+
+| Trường | Ý nghĩa |
+| --- | --- |
+| `purchasePriceVnd` | Giá nhập quy đổi, số nguyên VND |
+| `purchasePriceOriginal` | Số tiền gốc người dùng nhập |
+| `purchaseCurrency` | VND hoặc USD |
+| `exchangeRate` | Tỷ giá thực đã dùng; bằng 1 với VND |
+| `exchangeRateDate` | Chuỗi ngày API `YYYY-MM-DD` với USD; null với VND |
+
+Các trường được lưu chung transaction lưu sản phẩm hiện có. Khi service không nhận giá nhập mới, những trường đã lưu được giữ nguyên. Rules chấp nhận sản phẩm cũ không có cả bộ trường; khi có giá nhập thì yêu cầu đủ bộ trường và kiểm tra tiền tệ, dấu số tiền, tỷ giá, phép làm tròn. Ràng buộc SKU/user và ghi tồn kho/lịch sử vẫn giữ nguyên.
+
+**Trước khi dùng Add/Edit mới trên Firebase thật, phải áp dụng Rules cập nhật** từ `firestore.rules`, hoặc đối chiếu và áp dụng `firestore.merged.rules` nếu dùng chung Firebase với SnapLearn. Rules cũ sẽ từ chối các trường giá nhập mới. Chỉ source Rules được sửa trong đợt này; chưa deploy lên Firebase. Manifest Android đã có quyền INTERNET nên không cần thêm quyền.
+
+### File thêm/sửa và kiểm thử
+
+- Mới: `lib/models/exchange_rate.dart`, `lib/models/purchase_price.dart`, `lib/services/exchange_rate_service.dart`.
+- Sửa: `lib/models/product.dart`, `lib/services/product_service.dart`, `lib/screens/products/product_form_screen.dart`, `lib/screens/products/product_details_screen.dart`.
+- Dependency: `pubspec.yaml`, `pubspec.lock` — khai báo trực tiếp `http: ^1.6.0` từ dependency đã có trong cache.
+- Rules: `firestore.rules`, `firestore.merged.rules`.
+- Test mới: `test/exchange_rate_service_test.dart`, `test/purchase_price_form_test.dart`.
+- Test cập nhật: `test/inventory_service_test.dart`, `test/sample_product_service_test.dart`, `test/firestore_inventory_rules_test.mjs`.
+- Tài liệu: `README.md`.
+
+Kiểm thử bao gồm GET đúng endpoint/header, HTTP lỗi, JSON/rate/cặp tiền/ngày sai, mạng/timeout, VND không gọi API, USD thành công, tính lại khi đổi giá, Refresh, chuyển tiền tệ khi request đang chạy, số âm/rỗng, xác nhận lưu, khôi phục giá nhập khi Edit, dữ liệu cũ, bảo toàn giá bán/tồn và lưu giá nhập cùng sản phẩm. Tỷ giá cố định trong test chỉ là fixture, không được sử dụng trong code chạy thật.
+
+Emulator kiểm tra cả hai bộ Rules: tạo sản phẩm có giá nhập và SKU reservation, sửa USD/VND, từ chối quy đổi sai/âm/tỷ giá 0/tiền tệ khác/ngày sai/user khác, đọc lại dữ liệu và nhập kho sau khi thêm giá nhập. Chỉ dùng dữ liệu tạm của demo project; không truy cập database thật.
+
+Chưa chạy app trên Android hoặc kiểm tra đóng/mở lại với Firebase thật. Để demo, sau khi Publish Rules: thêm giá nhập USD, xác nhận; đóng/mở app và vào Product Details/Edit để đối chiếu giá nhập/tỷ giá đã lưu; thử mất mạng và chuyển về VND. Authentication không bị chỉnh sửa.
+
+Kết quả kiểm tra đợt Currency Exchange: **43 Flutter test đạt**; **130 assertions đạt trên Firestore Emulator** cho cả hai bộ Rules; `flutter analyze --no-pub` báo **No issues found**; kiểm tra Dart format xác nhận 11 file Dart thay đổi đúng định dạng. GET trực tiếp đến endpoint thật trả HTTP 200 với response đã ghi ở trên.
+
+## Inventory Reports — Báo cáo kho
+
+Trên **Trang chủ → Thao tác nhanh → Báo cáo kho**, mở màn hình **Inventory Reports**. Back trở về Dashboard, không thêm tab Bottom Navigation. Mặc định chọn **Tháng này** (từ ngày 1 đến hết ngày hiện tại); có Hôm nay, 7 ngày qua (gồm hôm nay và 6 ngày trước), hoặc Tùy chọn. Bộ lọc chỉ áp dụng cho thống kê/biểu đồ giao dịch; các phần tổng quan, cần nhập thêm và tồn kho theo sản phẩm luôn là dữ liệu hiện tại.
+
+### Dữ liệu và công thức
+
+Reports đọc `ProductService.watchProducts()` và `InventoryService.watchMovements()` của user hiện tại, rồi tổng hợp trên Flutter. Không có thao tác ghi khi chỉ xem hoặc làm mới báo cáo. Không đổi Authentication, Firestore schema/Rules, service nhập/xuất, dependency, backend hoặc API. Không cần composite index mới: chỉ sử dụng các query hiện có và lọc ngày ở phía Flutter.
+
+| Chỉ số | Công thức / ý nghĩa |
+| --- | --- |
+| Tổng sản phẩm | Số product đang hoạt động của user; loại archived và trùng ID |
+| Tổng số lượng tồn | Tổng `quantity` hiện tại; không cộng lại nhập/xuất vào quantity |
+| Giá trị tồn kho | Tổng `quantity × purchasePriceVnd` của sản phẩm có giá nhập VND hợp lệ |
+| Tồn thấp | `0 < quantity <= minStock` |
+| Hết hàng | `quantity == 0`, không đếm vào tồn thấp |
+| Tổng số lượng nhập / xuất | Tổng `quantity` của các movement IN / OUT trong kỳ |
+| Số giao dịch nhập / xuất | Số bản ghi IN / OUT trong kỳ, khác tổng số lượng |
+| Biến động ròng | Tổng số lượng nhập − tổng số lượng xuất; không phải tồn kho hiện tại |
+| Bổ sung tối thiểu | `max(0, minStock − quantity)`; không phải dự báo |
+
+`purchasePriceVnd` hợp lệ là số nguyên không âm trong giới hạn giá đã có. Reports đọc trực tiếp giá VND đã lưu, không gọi lại API tỷ giá hoặc dùng giá bán thay thế. Sản phẩm thiếu/sai giá nhập hiển thị **Chưa có giá nhập**, giá trị riêng **chưa xác định**. Tổng giá trị ghi rõ số sản phẩm có/thiếu giá nhập và chỉ là tổng phần đã biết. Giá nhập bằng 0 hợp lệ được phân biệt với thiếu giá nhập. Giá trị tiền và phép nhân dùng `BigInt` để tránh tràn/mất chính xác với số lớn; format VND bằng dấu chấm phân cách nghìn.
+
+Tổng số lượng cộng các giá trị theo đơn vị riêng của từng sản phẩm, không quy đổi box/bottle/kg sang cùng một đơn vị. Lịch sử của sản phẩm đã archived vẫn được giữ trong báo cáo giao dịch; sản phẩm đó không xuất hiện trong báo cáo tồn kho hiện tại. Giao dịch được phân phạm vi user và loại trùng ID.
+
+### Khoảng ngày và biểu đồ
+
+Ngày giao dịch lấy từ `transactionDate`, fallback `createdAt` cho bản ghi cũ. Ngày được hiểu theo timezone của thiết bị, từ 00:00 ngày bắt đầu đến trước 00:00 ngày sau ngày kết thúc. Giao dịch không có cả hai ngày được đếm trong thông báo riêng và không gán ngày giả. Date Picker không cho khoảng đảo ngược hoặc ngày kết thúc ở tương lai.
+
+Biểu đồ cột có hai series: xanh lá nhập, đỏ xuất; trục Y là số lượng, trục X tăng dần theo thời gian. Hôm nay/7 ngày/tháng này và custom không quá 62 ngày nhóm theo ngày, gồm cả ngày không giao dịch với giá trị 0. Khoảng dài hơn nhóm theo tháng; khoảng rất dài gộp nhiều tháng để giữ tối đa 24 nhóm. Tooltip giới hạn theo đúng khoảng ngày chọn. Vuốt ngang để xem các cột, chạm để xem tổng số lượng. Biểu đồ được dựng bằng widget Flutter, không thêm thư viện hoặc dependency. Khi không có giao dịch, hiển thị empty state.
+
+Nhấn các thẻ số lượng/số giao dịch nhập hoặc xuất mở Inventory History hiện có, truyền đúng loại và khoảng ngày. Nhấn các chỉ số tổng sản phẩm/tồn kho hoặc nút xem tồn thấp/hết hàng mở Product List hiện có. Product Details và Stock In cũng được tái sử dụng từ các dòng sản phẩm cần bổ sung.
+
+### Các danh sách và cập nhật
+
+Danh sách cần nhập thêm đặt hết hàng lên trước rồi đến tồn thấp, hiển thị SKU, tồn hiện tại, minStock, badge và số bổ sung tối thiểu. Khi quantity bằng minStock, badge vẫn là tồn thấp và đề xuất bằng 0, có giải thích rõ. Có nút Nhập thêm hàng.
+
+Báo cáo theo sản phẩm có tìm tên/SKU không phân biệt hoa/thường, lọc danh mục, sort số lượng hoặc giá trị tồn tăng/giảm. Giá trị chưa xác định luôn đứng sau giá trị đã biết khi sort giá trị, không giả lập bằng 0. Mỗi dòng có tên, SKU, danh mục, tồn, đơn vị, giá nhập, giá trị tồn và trạng thái; nhấn mở chi tiết.
+
+Các stream cập nhật sau CRUD/Stock In/Out. Có nút làm mới trên AppBar và kéo xuống để gắn lại các stream. Lỗi hoặc chưa tải xong từng nguồn hiển thị trạng thái riêng, không biến thành các con số 0 giả; nguồn còn hoạt động vẫn hiển thị được. Làm mới/dữ liệu mới về không reset search, category, sort hoặc khoảng ngày đang chọn.
+
+### File tạo/sửa trong đợt Reports
+
+| Loại | File | Nội dung |
+| --- | --- | --- |
+| Mới | `lib/services/inventory_report_calculator.dart` | Bộ lọc ngày, tổng hợp hiện tại/giao dịch, nhóm biểu đồ, restock, sort giá trị và tiền BigInt |
+| Mới | `lib/screens/inventory/inventory_reports_screen.dart` | Màn hình báo cáo, filter, danh sách, thống kê, trạng thái và refresh |
+| Mới | `lib/widgets/stock_movement_chart.dart` | Biểu đồ cột hai series, trục, legend, tooltip và cuộn ngang |
+| Mới | `test/inventory_report_calculator_test.dart` | Công thức, ngày/giờ, legacy, user/archive, chống trùng, giá trị lớn và sort |
+| Mới | `test/inventory_reports_screen_test.dart` | Loading/error/empty/retry/refresh và chiều cao cột, font lớn |
+| Sửa | `lib/models/product.dart` | Chỉ bổ sung đọc `isArchived`, `purchasePriceVnd` hợp lệ; không sửa cách ghi sản phẩm |
+| Sửa | `lib/screens/dashboard_screen.dart` | Action Báo cáo kho |
+| Sửa | `lib/screens/stock_shell.dart` | Route Reports dùng đúng user và các service hiện có |
+| Sửa | `lib/screens/inventory/inventory_history_screen.dart` | Nhận khoảng ngày ban đầu khi mở từ Reports |
+| Sửa | `test/dashboard_navigation_test.dart` | Reports → History/Details/Stock In, Back, ngày tùy chọn, dữ liệu cập nhật và màn hình nhỏ |
+| Sửa | `README.md` | Hướng dẫn, công thức, giới hạn và báo cáo thay đổi |
+
+### Kiểm thử và giới hạn
+
+Kết quả thực chạy: **57 Flutter test đều đạt**, `flutter analyze --no-pub` **No issues found**; đã chạy `dart format .`. Kiểm thử mới gồm 9 trường hợp calculator và 5 trường hợp UI/navigation: tổng tồn/giá trị, thiếu giá nhập, tách tồn thấp/hết hàng, số lượng so với số giao dịch, ranh giới đầu/cuối ngày, UTC sang ngày địa phương, date presets/custom, legacy/missing date, không tính trùng, chart ngày/tháng, sort/filter, phạm vi user/archived, mở lại route, cập nhật dữ liệu, lỗi/empty/loading/refresh, màn hình 360×800 và biểu đồ 320px với text scale 1.8.
+
+Chưa chạy bản cập nhật trên Android hoặc kiểm tra đóng/mở lại app với Firebase thật. Để kiểm tra demo: mở Reports, chọn Tháng này, đối chiếu với History; chọn khoảng cũ và xác nhận tổng quan tồn kho không đổi; nhập thêm hàng từ dòng cảnh báo rồi quay lại kiểm tra tồn/giá trị và biểu đồ. Đóng/mở lại app rồi kiểm tra lại, sau đó đăng nhập tài khoản khác để kiểm tra kho độc lập.
+
+MVP đọc toàn bộ dữ liệu hiện có rồi tổng hợp trên máy; chưa có phân trang/tổng hợp server cho kho lớn. Hai stream sản phẩm và giao dịch có thể đến ở hai thời điểm khác nhau; báo cáo cập nhật theo từng stream, không phải snapshot đồng thời của cả database. Schema không lưu lịch sử giá nhập/tồn đầu kỳ đầy đủ để định giá tồn kho quá khứ, nên không suy diễn tồn kho lịch sử, lợi nhuận hoặc giá vốn. Không triển khai export, dự báo hoặc API mới trong đợt này.

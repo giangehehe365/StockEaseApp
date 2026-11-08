@@ -25,6 +25,7 @@ class DashboardScreen extends StatelessWidget {
     this.onProductStats,
     this.onMovementStats,
     this.onRestock,
+    this.onReports,
   });
 
   final String name;
@@ -43,6 +44,7 @@ class DashboardScreen extends StatelessWidget {
   onProductStats;
   final ValueChanged<StockMovementType>? onMovementStats;
   final ValueChanged<Product>? onRestock;
+  final VoidCallback? onReports;
 
   @override
   Widget build(BuildContext context) {
@@ -119,6 +121,11 @@ class DashboardScreen extends StatelessWidget {
               avatar: const Icon(Icons.history),
               label: const Text('Lịch sử kho'),
               onPressed: onHistory,
+            ),
+            ActionChip(
+              avatar: const Icon(Icons.assessment_outlined),
+              label: const Text('Báo cáo kho'),
+              onPressed: onReports,
             ),
           ],
         ),

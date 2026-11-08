@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../models/product.dart';
+import '../models/purchase_price.dart';
 
 class ProductException implements Exception {
   const ProductException(this.message);
@@ -62,7 +63,11 @@ class ProductService {
     required int minStock,
     required String unit,
     int? quantity,
+    PurchasePrice? purchasePrice,
   }) async {
+    if (purchasePrice != null && !purchasePrice.isValid) {
+      throw const ProductException('Giá nhập hoặc tỷ giá không hợp lệ.');
+    }
     final skuKey = sku.trim().toUpperCase();
     if (!skuPattern.hasMatch(sku.trim())) {
       throw const ProductException('SKU không hợp lệ.');
@@ -77,6 +82,7 @@ class ProductService {
       'minStock': minStock,
       'unit': unit,
       'updatedAt': FieldValue.serverTimestamp(),
+      if (purchasePrice != null) ...purchasePrice.toData(),
     };
 
     await _db.runTransaction((transaction) async {

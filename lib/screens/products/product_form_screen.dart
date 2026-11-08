@@ -2,13 +2,22 @@ import 'package:flutter/material.dart';
 
 import '../../models/product.dart';
 import '../../models/product_options.dart';
+import '../../models/exchange_rate.dart';
+import '../../models/purchase_price.dart';
+import '../../services/exchange_rate_service.dart';
 import '../../services/product_service.dart';
 
 class ProductFormScreen extends StatefulWidget {
-  const ProductFormScreen({super.key, required this.service, this.product});
+  const ProductFormScreen({
+    super.key,
+    required this.service,
+    this.product,
+    this.exchangeRates,
+  });
 
   final ProductService service;
   final Product? product;
+  final ExchangeRateService? exchangeRates;
 
   @override
   State<ProductFormScreen> createState() => _ProductFormScreenState();
@@ -22,6 +31,23 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
     text: widget.product?.price.toString() ?? '0',
   );
   final _quantity = TextEditingController(text: '0');
+  late final _purchase = TextEditingController(
+    text:
+        widget.product?.purchasePrice?.original.toString() ??
+        (widget.product == null ? '0' : ''),
+  );
+  late String _currency = widget.product?.purchasePrice?.currency ?? 'VND';
+  late ExchangeRate? _rate = widget.product?.purchasePrice?.currency == 'USD'
+      ? ExchangeRate(
+          rate: widget.product!.purchasePrice!.rate,
+          date: widget.product!.purchasePrice!.rateDate!,
+        )
+      : null;
+  late final _exchangeRates = widget.exchangeRates ?? ExchangeRateService();
+  bool _loadingRate = false;
+  bool _confirmingPrice = false;
+  String? _rateError;
+  int _rateRequest = 0;
   late final _minStock = TextEditingController(
     text: widget.product?.minStock.toString() ?? '0',
   );
@@ -64,8 +90,178 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
     _price.dispose();
     _quantity.dispose();
     _minStock.dispose();
+    _purchase.dispose();
+    _rateRequest++;
+    if (widget.exchangeRates == null) _exchangeRates.close();
     super.dispose();
   }
+
+  bool get _legacyWithoutPurchase =>
+      widget.product != null &&
+      widget.product!.purchasePrice == null &&
+      _purchase.text.trim().isEmpty &&
+      _currency == 'VND';
+
+  PurchasePrice? get _purchasePrice {
+    final amount = parsePurchaseAmount(_purchase.text, _currency);
+    if (amount == null ||
+        (_currency == 'USD' &&
+            (_loadingRate || _rate == null || _rateError != null))) {
+      return null;
+    }
+    final rate = _currency == 'VND' ? 1.0 : _rate!.rate;
+    final converted = amount * rate;
+    if (!converted.isFinite || converted >= PurchasePrice.maxAmount + .5) {
+      return null;
+    }
+    final purchase = PurchasePrice(
+      original: amount,
+      currency: _currency,
+      rate: rate,
+      vnd: converted.round(),
+      rateDate: _currency == 'USD' ? _rate!.date : null,
+    );
+    return purchase.isValid ? purchase : null;
+  }
+
+  Future<void> _loadRate() async {
+    final request = ++_rateRequest;
+    setState(() {
+      _loadingRate = true;
+      _rateError = null;
+      _rate = null;
+    });
+    try {
+      final rate = await _exchangeRates.getUsdVnd();
+      if (!mounted || request != _rateRequest || _currency != 'USD') return;
+      setState(() {
+        _rate = rate;
+        _loadingRate = false;
+        _dirty = true;
+      });
+    } on ExchangeRateException catch (error) {
+      if (!mounted || request != _rateRequest || _currency != 'USD') return;
+      setState(() {
+        _rateError = error.message;
+        _loadingRate = false;
+      });
+    }
+  }
+
+  void _changeCurrency(String currency) {
+    setState(() {
+      _currency = currency;
+      if (currency == 'VND') {
+        final amount = num.tryParse(_purchase.text.trim().replaceAll(',', '.'));
+        if (amount != null &&
+            amount.isFinite &&
+            amount == amount.roundToDouble()) {
+          _purchase.text = amount.toInt().toString();
+        }
+      }
+      _dirty = true;
+      _rateError = null;
+      if (currency == 'VND') {
+        _rateRequest++;
+        _loadingRate = false;
+      }
+    });
+    if (currency == 'USD' && _rate == null) _loadRate();
+  }
+
+  Widget _purchaseSection() => Card(
+    clipBehavior: Clip.antiAlias,
+    child: ExpansionTile(
+      initiallyExpanded: widget.product?.purchasePrice != null,
+      title: const Text('Giá nhập (Purchase Price)'),
+      subtitle: Text(
+        _purchasePrice == null
+            ? 'VND hoặc USD'
+            : formatVnd(_purchasePrice!.vnd),
+      ),
+      childrenPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+      children: [
+        TextFormField(
+          key: const ValueKey('purchaseAmount'),
+          controller: _purchase,
+          enabled: !_saving && !_confirmingPrice,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          autovalidateMode: AutovalidateMode.onUserInteraction,
+          decoration: InputDecoration(
+            labelText: 'Giá nhập gốc ($_currency)',
+            helperText: _currency == 'USD'
+                ? 'Tối đa 2 số lẻ; dùng dấu chấm hoặc phẩy.'
+                : (widget.product != null &&
+                          widget.product!.purchasePrice == null
+                      ? 'Có thể để trống với sản phẩm cũ.'
+                      : 'Số nguyên VND, không nhập dấu phân cách nghìn.'),
+            helperMaxLines: 2,
+          ),
+          onChanged: (_) => setState(() {}),
+          validator: (_) {
+            if (_legacyWithoutPurchase) return null;
+            if (parsePurchaseAmount(_purchase.text, _currency) == null) {
+              return 'Hãy nhập giá nhập không âm hợp lệ.';
+            }
+            if (!_loadingRate &&
+                (_currency == 'VND' || _rate != null) &&
+                _purchasePrice == null) {
+              return 'Giá nhập quy đổi quá lớn.';
+            }
+            return null;
+          },
+        ),
+        const SizedBox(height: 12),
+        DropdownButtonFormField<String>(
+          key: const ValueKey('purchaseCurrency'),
+          initialValue: _currency,
+          isExpanded: true,
+          decoration: const InputDecoration(labelText: 'Tiền tệ'),
+          items: const [
+            DropdownMenuItem(value: 'VND', child: Text('VND')),
+            DropdownMenuItem(value: 'USD', child: Text('USD')),
+          ],
+          onChanged: _saving || _confirmingPrice
+              ? null
+              : (value) => _changeCurrency(value!),
+        ),
+        if (_currency == 'USD') ...[
+          const SizedBox(height: 12),
+          if (_loadingRate) const LinearProgressIndicator(),
+          if (_rate != null) ...[
+            Text('1 USD = ${_rate!.rate} VND'),
+            Text('Ngày tỷ giá: ${_rate!.date}'),
+          ],
+          if (_rateError != null)
+            Semantics(
+              liveRegion: true,
+              child: Text(
+                _rateError!,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            ),
+          TextButton.icon(
+            onPressed: _loadingRate || _saving || _confirmingPrice
+                ? null
+                : _loadRate,
+            icon: const Icon(Icons.refresh),
+            label: Text(
+              _loadingRate
+                  ? 'Đang lấy tỷ giá…'
+                  : (_rateError == null ? 'Làm mới tỷ giá' : 'Thử lại tỷ giá'),
+            ),
+          ),
+        ],
+        const SizedBox(height: 8),
+        Text(
+          _purchasePrice == null
+              ? 'Chưa có giá nhập quy đổi hợp lệ'
+              : 'Giá nhập quy đổi: ${formatVnd(_purchasePrice!.vnd)}',
+          style: Theme.of(context).textTheme.titleSmall,
+        ),
+      ],
+    ),
+  );
 
   String? _validateNumber(String? value) {
     final number = int.tryParse(value?.trim() ?? '', radix: 10);
@@ -75,8 +271,40 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
   }
 
   Future<void> _save() async {
-    if (_saving || !_form.currentState!.validate()) return;
+    if (_saving || _confirmingPrice || !_form.currentState!.validate()) return;
+    final purchase = _purchasePrice;
+    if (purchase == null && !_legacyWithoutPurchase) return;
     FocusScope.of(context).unfocus();
+    if (purchase != null) {
+      setState(() => _confirmingPrice = true);
+      final confirmed = await showDialog<bool>(
+        context: context,
+        useRootNavigator: false,
+        builder: (context) => AlertDialog(
+          title: const Text('Xác nhận giá nhập'),
+          content: SingleChildScrollView(
+            child: Text(
+              '${purchase.original} ${purchase.currency}\n'
+              '${purchase.currency == 'USD' ? '1 USD = ${purchase.rate} VND\nNgày tỷ giá: ${purchase.rateDate}\n' : ''}'
+              'Giá nhập lưu: ${formatVnd(purchase.vnd)}\nGiá bán: ${formatVnd(int.parse(_price.text.trim()))}',
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Hủy'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Xác nhận lưu'),
+            ),
+          ],
+        ),
+      );
+      if (!mounted) return;
+      setState(() => _confirmingPrice = false);
+      if (confirmed != true) return;
+    }
     setState(() {
       _saving = true;
       _error = null;
@@ -94,6 +322,7 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
             : null,
         minStock: int.parse(_minStock.text.trim(), radix: 10),
         unit: _unit,
+        purchasePrice: purchase,
       );
     } on Exception catch (error) {
       if (!mounted) return;
@@ -206,7 +435,9 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
                       style: Theme.of(context).textTheme.titleLarge,
                     ),
                     const SizedBox(height: 16),
-                    _numberField(_price, 'Giá (VND)'),
+                    _numberField(_price, 'Giá bán (VND)'),
+                    const SizedBox(height: 16),
+                    _purchaseSection(),
                     if (!editing) ...[
                       const SizedBox(height: 16),
                       _numberField(_quantity, 'Số lượng tồn ban đầu'),
@@ -244,7 +475,13 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
                     ],
                     const SizedBox(height: 24),
                     FilledButton(
-                      onPressed: _saving ? null : _save,
+                      onPressed:
+                          _saving ||
+                              _confirmingPrice ||
+                              (!_legacyWithoutPurchase &&
+                                  _purchasePrice == null)
+                          ? null
+                          : _save,
                       child: _saving
                           ? const SizedBox.square(
                               dimension: 20,

@@ -22,10 +22,29 @@ service cloud.firestore {
       return value is int && value >= 0 && value <= 999999999999;
     }
 
+    function validPurchase(data) {
+      let fields = ['purchasePriceVnd', 'purchasePriceOriginal', 'purchaseCurrency', 'exchangeRate', 'exchangeRateDate'];
+      return !data.keys().hasAny(fields) || (
+        data.keys().hasAll(fields)
+        && validNumber(data.purchasePriceVnd)
+        && data.purchasePriceOriginal is number
+        && data.purchasePriceOriginal >= 0 && data.purchasePriceOriginal <= 999999999999
+        && data.exchangeRate is number && data.exchangeRate > 0
+        && data.purchasePriceVnd > data.purchasePriceOriginal * data.exchangeRate - 0.5
+        && data.purchasePriceVnd <= data.purchasePriceOriginal * data.exchangeRate + 0.5
+        && (
+          (data.purchaseCurrency == 'VND' && data.exchangeRate == 1
+            && data.purchasePriceOriginal == data.purchasePriceVnd && data.exchangeRateDate == null)
+          || (data.purchaseCurrency == 'USD' && data.exchangeRateDate is string
+            && data.exchangeRateDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$'))
+        )
+      );
+    }
     function validProduct(data, uid) {
       return data.keys().hasOnly([
           'userId', 'name', 'sku', 'category', 'price', 'quantity', 'minStock',
-          'unit', 'createdAt', 'updatedAt', 'isArchived', 'lastMovementId'
+          'unit', 'createdAt', 'updatedAt', 'isArchived', 'lastMovementId',
+          'purchasePriceVnd', 'purchasePriceOriginal', 'purchaseCurrency', 'exchangeRate', 'exchangeRateDate'
         ])
         && data.userId == uid
         && data.name is string && data.name.size() > 0 && data.name.size() <= 120
@@ -35,7 +54,7 @@ service cloud.firestore {
         && validNumber(data.minStock)
         && data.unit in ['piece', 'box', 'bottle', 'can', 'pack', 'kg']
         && data.createdAt is timestamp && data.updatedAt == request.time
-        && data.isArchived is bool;
+        && data.isArchived is bool && validPurchase(data);
     }
 
     match /users/{uid}/stockease/profile {
@@ -131,7 +150,8 @@ service cloud.firestore {
           (
             nextProduct().isArchived == false
             && nextProduct().diff(resource.data).affectedKeys().hasOnly([
-              'name', 'sku', 'category', 'price', 'minStock', 'unit', 'updatedAt'
+              'name', 'sku', 'category', 'price', 'minStock', 'unit', 'updatedAt',
+              'purchasePriceVnd', 'purchasePriceOriginal', 'purchaseCurrency', 'exchangeRate', 'exchangeRateDate'
             ])
             && holdsSku(nextProduct().sku)
             && (nextProduct().sku == resource.data.sku || releasedPreviousSku())
@@ -169,4 +189,5 @@ service cloud.firestore {
     }
   }
 }
+
 

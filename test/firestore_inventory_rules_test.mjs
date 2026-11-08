@@ -135,6 +135,66 @@ for (const rules of ['firestore.rules', 'firestore.merged.rules']) {
       quantity: n(2), note: s(''), createdAt: t(past),
     } } }), 200);
     await expectStatus(await request('/users/owner/stockMovements/legacy'), 200);
+    // Test fixtures below validate purchase fields; they are not live API rates.
+    await expectStatus(await request('/users/owner/productSkus/BV001', {
+      method: 'PATCH', admin: true, body: { fields: { productId: s('p') } },
+    }), 200);
+    const usdPurchase = {
+      purchasePriceOriginal: n(2), purchaseCurrency: s('USD'),
+      exchangeRate: { doubleValue: 100.25 }, exchangeRateDate: s('2025-01-02'), purchasePriceVnd: n(201),
+    };
+    const editPurchase = fields => ({
+      update: { name: `${prefix}/${productPath}`, fields },
+      updateMask: { fieldPaths: Object.keys(fields) },
+      updateTransforms: [{ fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' }],
+    });
+    await expectStatus(await commit([editPurchase(usdPurchase)]), 200);
+    await verifyStock(12);
+    let persisted = await request(`/${productPath}`);
+    assert.equal(persisted.body.fields.price.integerValue, '10000');
+    assert.equal(persisted.body.fields.purchasePriceVnd.integerValue, '201');
+    assert.equal(persisted.body.fields.exchangeRateDate.stringValue, '2025-01-02');
+    checks += 3;
+    for (const invalid of [
+      { ...usdPurchase, purchasePriceVnd: n(200) },
+      { ...usdPurchase, purchasePriceOriginal: n(-1) },
+      { ...usdPurchase, exchangeRate: n(0) },
+      { ...usdPurchase, purchaseCurrency: s('EUR') },
+      { ...usdPurchase, exchangeRateDate: s('not-a-date') },
+    ]) {
+      await expectStatus(await commit([editPurchase(invalid)]), 403);
+    }
+    await expectStatus(await commit([editPurchase({ purchasePriceVnd: n(9) })]), 403);
+    await expectStatus(await commit([editPurchase(usdPurchase)], { user: 'other' }), 403);
+    // Valid VND needs no API date, with identity conversion.
+    await expectStatus(await commit([editPurchase({
+      purchasePriceOriginal: n(12500), purchaseCurrency: s('VND'),
+      exchangeRate: n(1), exchangeRateDate: { nullValue: null }, purchasePriceVnd: n(12500),
+    })]), 200);
+    const withPurchaseMovement = 'J'.repeat(20);
+    await expectStatus(await commit([stockWrite(13, withPurchaseMovement), movementWrite(withPurchaseMovement, 'IN', 1, past)]), 200);
+    await verifyStock(13);
+    persisted = await request(`/${productPath}`);
+    assert.equal(persisted.body.fields.price.integerValue, '10000');
+    assert.equal(persisted.body.fields.purchasePriceVnd.integerValue, '12500');
+    checks += 2;
+    // Creating a new product pairs its SKU reservation and purchase snapshot.
+    const newProduct = 'users/owner/products/purchase';
+    const createdFields = { ...seed, ...usdPurchase, sku: s('PURCHASE') };
+    delete createdFields.createdAt;
+    delete createdFields.updatedAt;
+    await expectStatus(await commit([
+      { update: { name: `${prefix}/${newProduct}`, fields: createdFields },
+        updateTransforms: [
+          { fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' },
+          { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
+        ] },
+      { update: { name: `${prefix}/users/owner/productSkus/PURCHASE`, fields: { productId: s('purchase') } } },
+    ]), 200);
+    const newRead = await request(`/${newProduct}`);
+    await expectStatus(newRead, 200);
+    assert.equal(newRead.body.fields.purchasePriceVnd.integerValue, '201');
+    checks++;
     // Archived products reject stock changes without producing history.
     await expectStatus(await request(`/${productPath}`, { method: 'PATCH', admin: true, body: { fields: {
       ...seed, quantity: n(12), isArchived: { booleanValue: true },
@@ -143,7 +203,7 @@ for (const rules of ['firestore.rules', 'firestore.merged.rules']) {
     await expectStatus(await commit([stockWrite(13, archived), movementWrite(archived, 'IN', 1, past)]), 403);
     await verifyStock(12);
     await verifyAbsent(archived);
-    console.log(`PASS ${rules}: atomic writes, invalid/future/archived rejection, ownership, legacy reads`);
+    console.log(`PASS ${rules}: inventory atomicity, ownership, legacy reads, purchase CRUD/rounding and stock preservation`);
   } catch (error) {
     console.error(logs.slice(-6000));
     throw error;

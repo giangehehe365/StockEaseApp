@@ -12,12 +12,14 @@ class InventoryHistoryScreen extends StatefulWidget {
     this.productId,
     this.productName,
     this.initialFilter,
+    this.initialDateRange,
   });
 
   final InventoryService inventory;
   final String? productId;
   final String? productName;
   final StockMovementType? initialFilter;
+  final DateTimeRange? initialDateRange;
 
   @override
   State<InventoryHistoryScreen> createState() => _InventoryHistoryScreenState();
@@ -29,7 +31,7 @@ class _InventoryHistoryScreenState extends State<InventoryHistoryScreen> {
   );
   final _search = TextEditingController();
   late StockMovementType? _filter = widget.initialFilter;
-  DateTimeRange? _range;
+  late DateTimeRange? _range = widget.initialDateRange;
 
   @override
   void dispose() {

@@ -14,6 +14,8 @@ import 'package:stockease/screens/products/product_list_screen.dart';
 import 'package:stockease/screens/products/product_details_screen.dart';
 import 'package:stockease/screens/inventory/inventory_history_screen.dart';
 import 'package:stockease/screens/inventory/stock_movement_screen.dart';
+import 'package:stockease/screens/inventory/inventory_reports_screen.dart';
+import 'package:stockease/widgets/stock_movement_chart.dart';
 import 'package:stockease/services/auth_service.dart';
 import 'package:stockease/services/product_service.dart';
 import 'package:stockease/services/inventory_service.dart';
@@ -263,6 +265,200 @@ void main() {
       0,
     );
   }
+
+  Future<void> openReports(WidgetTester tester) async {
+    await tester.ensureVisible(find.text('Báo cáo kho'));
+    await tester.tap(find.text('Báo cáo kho'));
+    await tester.pumpAndSettle();
+    expect(find.byType(InventoryReportsScreen), findsOneWidget);
+  }
+
+  Finder reportMetric(String title, String value) => find.descendant(
+    of: find.ancestor(of: find.text(title), matching: find.byType(Card)).first,
+    matching: find.text(value),
+  );
+
+  testWidgets(
+    'reports opens from Dashboard, separates current stock from date filter and drills into History',
+    (tester) async {
+      db.documents['users/owner/products/healthy']!['purchasePriceVnd'] = 500;
+      db.documents['users/owner/products/low']!['purchasePriceVnd'] = 100;
+      final now = DateTime.now();
+      db.documents['users/owner/stockMovements/IN']!['transactionDate'] =
+          Timestamp.fromDate(now);
+      db.documents['users/owner/stockMovements/OUT']!['transactionDate'] =
+          Timestamp.fromDate(now);
+      await mount(tester);
+      await openReports(tester);
+      expect(
+        tester
+            .widget<ChoiceChip>(find.widgetWithText(ChoiceChip, 'Tháng này'))
+            .selected,
+        isTrue,
+      );
+      expect(reportMetric('Tổng sản phẩm', '3'), findsOneWidget);
+      expect(reportMetric('Tổng số lượng tồn', '12'), findsOneWidget);
+      expect(reportMetric('Giá trị tồn kho', '5.200 ₫'), findsOneWidget);
+      expect(reportMetric('Tồn thấp / Hết hàng', '1 / 1'), findsOneWidget);
+      expect(find.textContaining('1 sản phẩm thiếu giá nhập'), findsOneWidget);
+      await tester.tap(find.widgetWithText(ChoiceChip, 'Hôm nay'));
+      await tester.pumpAndSettle();
+      expect(reportMetric('Giá trị tồn kho', '5.200 ₫'), findsOneWidget);
+      final chart = tester.widget<StockMovementChart>(
+        find.byType(StockMovementChart),
+      );
+      expect(chart.report.buckets.length, 1);
+      expect(chart.report.buckets.single.stockIn, 1);
+      expect(chart.report.buckets.single.stockOut, 1);
+      await tester.ensureVisible(find.text('Tổng số lượng nhập'));
+      await tester.tap(find.text('Tổng số lượng nhập'));
+      await tester.pumpAndSettle();
+      final history = tester.widget<InventoryHistoryScreen>(
+        find.byType(InventoryHistoryScreen),
+      );
+      expect(history.initialFilter, StockMovementType.stockIn);
+      expect(
+        history.initialDateRange!.start,
+        DateTime(now.year, now.month, now.day),
+      );
+      expect(find.text('Phiếu nhập'), findsOneWidget);
+      expect(find.text('Phiếu xuất'), findsNothing);
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      expect(find.byType(DashboardScreen), findsOneWidget);
+      expect(db.paths.every((path) => path.startsWith('users/owner/')), isTrue);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'reports custom dates show old movements while live stock changes update overview',
+    (tester) async {
+      await mount(tester);
+      await openReports(tester);
+      expect(
+        find.text('Chưa có giao dịch trong khoảng ngày đã chọn.'),
+        findsOneWidget,
+      );
+      await tester.tap(find.widgetWithText(ChoiceChip, 'Tùy chọn'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Switch to input'));
+      await tester.pumpAndSettle();
+      final dates = find.descendant(
+        of: find.byType(DateRangePickerDialog),
+        matching: find.byType(TextField),
+      );
+      await tester.enterText(dates.first, '01/01/2025');
+      await tester.enterText(dates.last, '01/01/2025');
+      await tester.tap(find.widgetWithText(TextButton, 'OK'));
+      await tester.pumpAndSettle();
+      final chart = tester.widget<StockMovementChart>(
+        find.byType(StockMovementChart),
+      );
+      expect(chart.report.inQuantity, 1);
+      expect(chart.report.outQuantity, 1);
+      expect(find.text('01/01/2025 – 01/01/2025'), findsOneWidget);
+      db.documents['users/owner/products/zero']!['quantity'] = 6;
+      db.publish();
+      await tester.pumpAndSettle();
+      expect(reportMetric('Tổng số lượng tồn', '18'), findsOneWidget);
+      expect(reportMetric('Tồn thấp / Hết hàng', '1 / 0'), findsOneWidget);
+      expect(find.text('01/01/2025 – 01/01/2025'), findsOneWidget);
+      expect(
+        tester
+            .widget<StockMovementChart>(find.byType(StockMovementChart))
+            .report
+            .inQuantity,
+        1,
+      );
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      await openReports(tester);
+      expect(reportMetric('Tổng số lượng tồn', '18'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'report product filters, sorting, details and restock work on a small screen',
+    (tester) async {
+      await mount(tester, size: const Size(360, 800));
+      await openReports(tester);
+      final scroll = find
+          .descendant(
+            of: find.byType(InventoryReportsScreen),
+            matching: find.byType(Scrollable),
+          )
+          .first;
+      await tester.scrollUntilVisible(
+        find.text('Bổ sung tối thiểu: 3 box'),
+        350,
+        scrollable: scroll,
+      );
+      final restockCard = find.ancestor(
+        of: find.text('Bổ sung tối thiểu: 3 box'),
+        matching: find.byType(Card),
+      );
+      await tester.ensureVisible(
+        find.descendant(of: restockCard, matching: find.text('Nhập thêm hàng')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.descendant(of: restockCard, matching: find.text('Nhập thêm hàng')),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<StockMovementScreen>(find.byType(StockMovementScreen))
+            .product
+            .id,
+        'zero',
+      );
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      final search = find.widgetWithText(
+        TextField,
+        'Tìm tên hoặc SKU trong báo cáo',
+      );
+      await tester.scrollUntilVisible(search, 350, scrollable: scroll);
+      await tester.enterText(search, 'low');
+      await tester.pumpAndSettle();
+      expect(find.text('Hiển thị 1/3 sản phẩm'), findsOneWidget);
+      await tester.ensureVisible(find.text('Số lượng giảm dần'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Số lượng giảm dần'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Giá trị tồn tăng dần').last);
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(
+        find.text('Giá trị tồn: chưa xác định'),
+        150,
+        scrollable: scroll,
+      );
+      // Legacy products have an unknown purchase value, not a fabricated zero.
+      expect(find.text('Chưa có giá nhập'), findsWidgets);
+      final card = find.ancestor(
+        of: find.text('Giá trị tồn: chưa xác định'),
+        matching: find.byType(Card),
+      );
+      await tester.ensureVisible(
+        find.descendant(of: card, matching: find.text('Bánh gạo')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.descendant(of: card, matching: find.text('Bánh gạo')),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<ProductDetailsScreen>(find.byType(ProductDetailsScreen))
+            .productId,
+        'low',
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
 
   testWidgets(
     'all four product stats open reused routes with correct filters and Back',

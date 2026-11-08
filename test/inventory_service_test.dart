@@ -4,6 +4,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:stockease/models/stock_movement.dart';
+import 'package:stockease/models/purchase_price.dart';
 import 'package:stockease/services/inventory_service.dart';
 import 'package:stockease/services/product_service.dart';
 
@@ -51,6 +52,8 @@ class MemoryDocument extends Fake
   @override
   final String path;
   @override
+  String get id => path.split('/').last;
+  @override
   CollectionReference<Map<String, dynamic>> collection(String collectionPath) =>
       MemoryCollection('$path/$collectionPath');
 }
@@ -61,6 +64,8 @@ class MemorySnapshot<T extends Object?> extends Fake
   final T? value;
   @override
   T? data() => value;
+  @override
+  bool get exists => value != null;
 }
 
 class MemoryTransaction extends Fake implements Transaction {
@@ -101,6 +106,62 @@ class MemoryTransaction extends Fake implements Transaction {
 }
 
 void main() {
+  test('product creation persists separate purchase snapshot without changing selling price or stock', () async {
+    final db = MemoryFirestore();
+    const purchase = PurchasePrice(
+      original: 2,
+      currency: 'USD',
+      rate: 100.25,
+      vnd: 201,
+      rateDate: '2025-01-02',
+    );
+    final service = ProductService(db, 'owner');
+    await service.save(
+      name: 'Hàng mới',
+      sku: 'NEW',
+      category: 'Khác',
+      price: 15000,
+      minStock: 2,
+      unit: 'box',
+      quantity: 8,
+      purchasePrice: purchase,
+    );
+    final saved = db.documents['users/owner/products/new']!;
+    expect(saved['price'], 15000);
+    expect(saved['quantity'], 8);
+    expect(PurchasePrice.fromData(saved)!.toData(), purchase.toData());
+    await service.save(
+      id: 'new',
+      name: 'Đổi tên',
+      sku: 'NEW',
+      category: 'Khác',
+      price: 15000,
+      minStock: 2,
+      unit: 'box',
+    );
+    expect(db.documents['users/owner/products/new']!['quantity'], 8);
+    expect(
+      PurchasePrice.fromData(db.documents['users/owner/products/new']!)!
+          .toData(),
+      purchase.toData(),
+    );
+    await InventoryService(db, 'owner').record(
+      movementId: 'in',
+      productId: 'new',
+      type: StockMovementType.stockIn,
+      quantity: 2,
+      note: '',
+      transactionDate: DateTime(2025),
+    );
+    expect(db.documents['users/owner/products/new']!['quantity'], 10);
+    expect(db.documents['users/owner/products/new']!['price'], 15000);
+    expect(
+      PurchasePrice.fromData(db.documents['users/owner/products/new']!)!
+          .toData(),
+      purchase.toData(),
+    );
+  });
+
   const productPath = 'users/owner/products/p';
   const movementPath = 'users/owner/stockMovements/m';
   final past = DateTime(2025, 2, 1, 9, 30);

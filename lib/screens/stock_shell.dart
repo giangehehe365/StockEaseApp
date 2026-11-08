@@ -10,6 +10,7 @@ import '../services/product_service.dart';
 import '../services/store_profile_service.dart';
 import 'dashboard_screen.dart';
 import 'inventory/inventory_history_screen.dart';
+import 'inventory/inventory_reports_screen.dart';
 import 'inventory/product_selection_sheet.dart';
 import 'inventory/stock_movement_screen.dart';
 import 'products/product_details_screen.dart';
@@ -67,6 +68,16 @@ class _StockShellState extends State<StockShell> {
         service: _products!,
         inventory: _inventory!,
         productId: product.id,
+      ),
+    ),
+  );
+
+  void _openReports() => Navigator.of(context).push<void>(
+    MaterialPageRoute(
+      builder: (_) => InventoryReportsScreen(
+        userId: widget.uid,
+        products: _products!,
+        inventory: _inventory!,
       ),
     ),
   );
@@ -232,6 +243,9 @@ class _StockShellState extends State<StockShell> {
                         onAdd: _products == null ? null : _add,
                         onProducts: () => _select(1),
                         onOpen: _open,
+                        onReports: _products == null || _inventory == null
+                            ? null
+                            : _openReports,
                         onProductStats: _products == null
                             ? null
                             : _openProductStats,

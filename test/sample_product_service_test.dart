@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:stockease/models/purchase_price.dart';
 import 'package:stockease/services/product_service.dart';
 import 'package:stockease/services/sample_product_service.dart';
 
@@ -17,6 +18,7 @@ class SampleProductRepository extends Fake implements ProductService {
     required int minStock,
     required String unit,
     int? quantity,
+    PurchasePrice? purchasePrice,
   }) async {
     if (names.containsKey(sku)) throw const DuplicateSkuException();
     names[sku] = name;
