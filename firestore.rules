@@ -1,0 +1,172 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    function productPath(uid, id) {
+      return /databases/$(database)/documents/users/$(uid)/products/$(id);
+    }
+
+    function skuPath(uid, sku) {
+      return /databases/$(database)/documents/users/$(uid)/productSkus/$(sku);
+    }
+
+    function validSku(sku) {
+      return sku is string && sku.matches('^[A-Z0-9_-]{1,40}$')
+        && !sku.matches('^__.*__$');
+    }
+
+    function validNumber(value) {
+      return value is int && value >= 0 && value <= 999999999999;
+    }
+
+    function validProduct(data, uid) {
+      return data.keys().hasOnly([
+          'userId', 'name', 'sku', 'category', 'price', 'quantity', 'minStock',
+          'unit', 'createdAt', 'updatedAt', 'isArchived', 'lastMovementId'
+        ])
+        && data.userId == uid
+        && data.name is string && data.name.size() > 0 && data.name.size() <= 120
+        && validSku(data.sku)
+        && data.category in ['Đồ uống', 'Thực phẩm', 'Đồ ăn vặt', 'Chăm sóc cá nhân', 'Gia dụng', 'Văn phòng phẩm', 'Khác']
+        && validNumber(data.price) && validNumber(data.quantity)
+        && validNumber(data.minStock)
+        && data.unit in ['piece', 'box', 'bottle', 'can', 'pack', 'kg']
+        && data.createdAt is timestamp && data.updatedAt == request.time
+        && data.isArchived is bool;
+    }
+
+    match /users/{uid}/stockease/profile {
+      allow read: if isOwner(uid);
+      allow create, update: if isOwner(uid)
+        && request.resource.data.keys().hasOnly(['name', 'storeName'])
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.name.size() <= 80
+        && request.resource.data.storeName is string
+        && request.resource.data.storeName.size() > 0
+        && request.resource.data.storeName.size() <= 80;
+    }
+
+    function movementPath(uid, id) {
+      return /databases/$(database)/documents/users/$(uid)/stockMovements/$(id);
+    }
+
+    function validMovement(data, uid, productId) {
+      return data.keys().hasOnly([
+          'movementId', 'userId', 'productId', 'productName', 'sku', 'type', 'quantity', 'note', 'transactionDate', 'createdAt'
+        ])
+        && data.userId == uid && data.productId == productId
+        && data.productName is string && data.type in ['IN', 'OUT']
+        && validNumber(data.quantity) && data.quantity > 0
+        && data.note is string && data.note.size() <= 300
+        && data.createdAt == request.time
+        && data.transactionDate is timestamp && data.transactionDate <= request.time
+        && data.sku is string;
+    }
+
+    function validStockChange(before, after, movement, uid, productId, movementId) {
+      return before.userId == uid && before.isArchived == false
+        && before.get('lastMovementId', '') != movementId
+        && after.lastMovementId == movementId
+        && after.diff(before).affectedKeys().hasOnly([
+          'quantity', 'updatedAt', 'lastMovementId'
+        ])
+        && after.updatedAt == request.time
+        && validNumber(after.quantity)
+        && validMovement(movement, uid, productId)
+        && movement.movementId == movementId && movement.productName == before.name && movement.sku == before.sku
+        && after.quantity == before.quantity
+          + (movement.type == 'IN' ? movement.quantity : -movement.quantity);
+    }
+
+    match /users/{uid}/stockMovements/{id} {
+      function pairedProductUpdate(productId) {
+        let path = productPath(uid, productId);
+        return validStockChange(
+          get(path).data, getAfter(path).data, request.resource.data,
+          uid, productId, id
+        );
+      }
+
+      allow read: if isOwner(uid);
+      allow create: if isOwner(uid) && id.matches('^[A-Za-z0-9]{20}$')
+        && request.resource.data.productId is string
+        && request.resource.data.productId.matches('^[^/]+$')
+        && pairedProductUpdate(request.resource.data.productId);
+    }
+
+    match /users/{uid}/products/{id} {
+      function nextProduct() {
+        return request.resource.data;
+      }
+
+      function holdsSku(sku) {
+        return getAfter(skuPath(uid, sku)).data.productId == id;
+      }
+
+      function releasedPreviousSku() {
+        return !existsAfter(skuPath(uid, resource.data.sku));
+      }
+
+      function pairedMovement(movementId) {
+        let path = movementPath(uid, movementId);
+        return !exists(path)
+          && validStockChange(
+            resource.data, nextProduct(), getAfter(path).data,
+            uid, id, movementId
+          );
+      }
+
+      allow read: if isOwner(uid);
+      allow create: if isOwner(uid) && validProduct(nextProduct(), uid)
+        && !nextProduct().keys().hasAny(['lastMovementId'])
+        && nextProduct().isArchived == false
+        && nextProduct().createdAt == request.time && holdsSku(nextProduct().sku);
+      allow update: if isOwner(uid) && validProduct(nextProduct(), uid)
+        && resource.data.isArchived == false
+        && (
+          (
+            nextProduct().isArchived == false
+            && nextProduct().diff(resource.data).affectedKeys().hasOnly([
+              'name', 'sku', 'category', 'price', 'minStock', 'unit', 'updatedAt'
+            ])
+            && holdsSku(nextProduct().sku)
+            && (nextProduct().sku == resource.data.sku || releasedPreviousSku())
+          ) || (
+            nextProduct().isArchived == true
+            && nextProduct().diff(resource.data).affectedKeys().hasOnly([
+              'isArchived', 'updatedAt'
+            ])
+            && releasedPreviousSku()
+          ) || (
+            nextProduct().get('lastMovementId', '') is string
+            && nextProduct().get('lastMovementId', '').matches('^[A-Za-z0-9]{20}$')
+            && pairedMovement(nextProduct().lastMovementId)
+          )
+        );
+    }
+
+    match /users/{uid}/productSkus/{sku} {
+      function reservedProduct() {
+        return getAfter(productPath(uid, request.resource.data.productId)).data;
+      }
+
+      function previousProduct() {
+        return getAfter(productPath(uid, resource.data.productId)).data;
+      }
+
+      allow get: if isOwner(uid);
+      allow create: if isOwner(uid) && validSku(sku)
+        && request.resource.data.keys().hasOnly(['productId'])
+        && request.resource.data.productId is string
+        && reservedProduct().userId == uid
+        && reservedProduct().sku == sku && reservedProduct().isArchived == false;
+      allow delete: if isOwner(uid) && previousProduct().userId == uid
+        && (previousProduct().sku != sku || previousProduct().isArchived == true);
+    }
+  }
+}
+
