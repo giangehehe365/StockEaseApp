@@ -4,6 +4,8 @@ import '../../models/product.dart';
 import '../../models/product_options.dart';
 import '../../models/exchange_rate.dart';
 import '../../models/purchase_price.dart';
+import '../../models/product_barcode.dart';
+import '../barcode/barcode_scanner_screen.dart';
 import '../../services/exchange_rate_service.dart';
 import '../../services/product_service.dart';
 
@@ -13,11 +15,13 @@ class ProductFormScreen extends StatefulWidget {
     required this.service,
     this.product,
     this.exchangeRates,
+    this.initialBarcode,
   });
 
   final ProductService service;
   final Product? product;
   final ExchangeRateService? exchangeRates;
+  final String? initialBarcode;
 
   @override
   State<ProductFormScreen> createState() => _ProductFormScreenState();
@@ -27,6 +31,9 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
   final _form = GlobalKey<FormState>();
   late final _name = TextEditingController(text: widget.product?.name);
   late final _sku = TextEditingController(text: widget.product?.sku);
+  late final _barcode = TextEditingController(
+    text: widget.product?.barcode ?? widget.initialBarcode ?? '',
+  );
   late final _price = TextEditingController(
     text: widget.product?.price.toString() ?? '0',
   );
@@ -87,6 +94,7 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
   void dispose() {
     _name.dispose();
     _sku.dispose();
+    _barcode.dispose();
     _price.dispose();
     _quantity.dispose();
     _minStock.dispose();
@@ -323,6 +331,7 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
         minStock: int.parse(_minStock.text.trim(), radix: 10),
         unit: _unit,
         purchasePrice: purchase,
+        barcode: _barcode.text,
       );
     } on Exception catch (error) {
       if (!mounted) return;
@@ -411,6 +420,45 @@ class _ProductFormScreenState extends State<ProductFormScreen> {
                         }
                         return null;
                       },
+                    ),
+                    const SizedBox(height: 16),
+                    TextFormField(
+                      key: const ValueKey('productBarcode'),
+                      controller: _barcode,
+                      enabled: !_saving && !_confirmingPrice,
+                      maxLength: 128,
+                      autocorrect: false,
+                      enableSuggestions: false,
+                      textInputAction: TextInputAction.next,
+                      decoration: InputDecoration(
+                        labelText: 'Barcode (không bắt buộc)',
+                        helperText: 'Khác với SKU. Giữ nguyên số 0 ở đầu.',
+                        helperMaxLines: 2,
+                        suffixIcon: IconButton(
+                          tooltip: 'Quét barcode cho sản phẩm',
+                          icon: const Icon(Icons.barcode_reader),
+                          onPressed: _saving || _confirmingPrice
+                              ? null
+                              : () async {
+                                  FocusScope.of(context).unfocus();
+                                  final code = await Navigator.of(context)
+                                      .push<String>(
+                                        MaterialPageRoute(
+                                          builder: (_) =>
+                                              const BarcodeScannerScreen(),
+                                        ),
+                                      );
+                                  if (mounted && code != null) {
+                                    setState(() {
+                                      _barcode.text = code;
+                                      _dirty = true;
+                                    });
+                                  }
+                                },
+                        ),
+                      ),
+                      validator: (value) =>
+                          validBarcode(normalizeBarcode(value ?? '')) ? null : 'Barcode tối đa 128 ký tự ASCII, không có ký tự điều khiển.',
                     ),
                     const SizedBox(height: 16),
                     DropdownButtonFormField<String>(

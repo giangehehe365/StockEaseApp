@@ -213,7 +213,9 @@ class _StockMovementScreenState extends State<StockMovementScreen> {
                         ),
                         title: Text(product.name),
                         subtitle: Text(
-                          '${product.sku} · ${product.unit}\nTồn hiện tại: ${product.quantity} ${product.unit}',
+                          '${product.sku} · ${product.unit}\n'
+                          'Barcode: ${product.barcode.isEmpty ? 'Chưa khai báo' : product.barcode}\n'
+                          'Tồn hiện tại: ${product.quantity} ${product.unit}',
                         ),
                         isThreeLine: true,
                       ),

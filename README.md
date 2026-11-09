@@ -1,5 +1,7 @@
 # StockEase
 
+Hướng dẫn chức năng mới: [Barcode Scanner - cách dùng, dữ liệu, Rules và kiểm thử](docs/barcode-scanner.md).
+
 Ứng dụng Android quản lý kho cho cửa hàng nhỏ, phát triển bằng Flutter. Mốc đầu tiên gồm đăng ký và đăng nhập bằng email, đăng nhập Google, khôi phục phiên và đăng xuất bằng Firebase Authentication.
 
 ## Chạy trên Android
@@ -94,7 +96,7 @@ $env:FIRESTORE_JAVA = 'C:/path/to/jdk/bin/java.exe'
 node test/firestore_inventory_rules_test.mjs
 ```
 
-Script tự mở rồi đóng emulator cho từng bộ Rules, chỉ dùng project `demo-stockease-inventory`, dữ liệu tạm và cổng 8187; không truy cập Firebase thật. Có thể đổi cổng qua `FIRESTORE_TEST_PORT`. Script kiểm tra nhập/xuất hợp lệ, xuất quá tồn, ngày tương lai, ghi lệch tồn, ghi thiếu lịch sử/cập nhật sản phẩm, sản phẩm archived, quyền tài khoản, tính bất biến của lịch sử và đọc bản ghi cũ.
+Script tự mở rồi đóng emulator cho từng bộ Rules, chỉ dùng project `demo-stockease-inventory`, dữ liệu tạm và cổng local còn trống; không truy cập Firebase thật. Có thể chọn cổng qua `FIRESTORE_TEST_PORT`. Script kiểm tra nhập/xuất hợp lệ, xuất quá tồn, ngày tương lai, ghi lệch tồn, ghi thiếu lịch sử/cập nhật sản phẩm, sản phẩm archived, quyền tài khoản, tính bất biến của lịch sử và đọc bản ghi cũ.
 
 Vẫn cần kiểm tra thủ công trên Android: nhập/xuất với Firebase của nhóm, đóng/mở lại app, đăng xuất rồi đăng nhập tài khoản khác và mô phỏng mất mạng. Unit/widget test và emulator không thay thế kiểm tra vòng đời ứng dụng trên thiết bị.
 
@@ -282,3 +284,65 @@ Kết quả thực chạy: **57 Flutter test đều đạt**, `flutter analyze -
 Chưa chạy bản cập nhật trên Android hoặc kiểm tra đóng/mở lại app với Firebase thật. Để kiểm tra demo: mở Reports, chọn Tháng này, đối chiếu với History; chọn khoảng cũ và xác nhận tổng quan tồn kho không đổi; nhập thêm hàng từ dòng cảnh báo rồi quay lại kiểm tra tồn/giá trị và biểu đồ. Đóng/mở lại app rồi kiểm tra lại, sau đó đăng nhập tài khoản khác để kiểm tra kho độc lập.
 
 MVP đọc toàn bộ dữ liệu hiện có rồi tổng hợp trên máy; chưa có phân trang/tổng hợp server cho kho lớn. Hai stream sản phẩm và giao dịch có thể đến ở hai thời điểm khác nhau; báo cáo cập nhật theo từng stream, không phải snapshot đồng thời của cả database. Schema không lưu lịch sử giá nhập/tồn đầu kỳ đầy đủ để định giá tồn kho quá khứ, nên không suy diễn tồn kho lịch sử, lợi nhuận hoặc giá vốn. Không triển khai export, dự báo hoặc API mới trong đợt này.
+
+## Profile Management — Hồ sơ và tài khoản
+
+Mở tab **Hồ sơ** để xem avatar chữ cái đầu, tên, email và cửa hàng, cùng các nhóm thông tin cá nhân/cửa hàng/cài đặt tài khoản. Trường thiếu hiển thị **Chưa cập nhật**, avatar dùng dấu hỏi nếu chưa có tên. Email lấy từ Firebase Auth và chỉ đọc. Có loading, lỗi tải/retry, thông báo khi lưu và xác nhận đăng xuất. Nạp dữ liệu mẫu ở bản debug vẫn giữ nguyên chức năng.
+
+### Cấu trúc và tương thích dữ liệu
+
+Giữ document hiện có `users/{uid}/stockease/profile`, không đổi UID, không ghi vào document user chung với ứng dụng khác:
+
+| Trường | Cách sử dụng |
+| --- | --- |
+| `name` | Họ và tên, giữ tên trường cũ để tương thích; bắt buộc, tối đa 80 ký tự |
+| `storeName` | Một cửa hàng cho mỗi tài khoản; bắt buộc, tối đa 80 ký tự |
+| `phoneNumber` | Tùy chọn; dùng chung số cá nhân/liên hệ cửa hàng |
+| `storeAddress` | Tùy chọn, tối đa 200 ký tự |
+| `createdAt` | Server timestamp khi tạo hồ sơ mới; giữ nguyên nếu đã có; null với hồ sơ cũ chưa biết ngày tạo |
+| `updatedAt` | Server timestamp lần lưu hiện tại |
+
+UID gắn với đường dẫn và model; email do Auth quản lý nên không lưu bản sao hoặc cho sửa trong hồ sơ. Không lưu password trong Firestore hay local settings. Model đọc được hồ sơ cũ chỉ có `name`, `storeName`, thiếu trường mới mặc định chuỗi rỗng/ngày null; không backfill dữ liệu khi chỉ xem.
+
+### Edit Profile và đồng bộ tên
+
+Nhấn **Chỉnh sửa hồ sơ**, sửa tên/số điện thoại/cửa hàng/địa chỉ và **Lưu hồ sơ**. Họ tên, tên cửa hàng, địa chỉ được trim và gộp khoảng trắng thừa. Điện thoại bỏ dấu cách, ngoặc, chấm và gạch nối, sau đó yêu cầu 7–15 chữ số với dấu `+` tùy chọn ở đầu. Đây là kiểm tra định dạng, không xác minh quyền sở hữu số qua OTP. Có lỗi dưới input, chặn nhấn lặp khi lưu và cảnh báo khi rời với thay đổi chưa lưu.
+
+Không gửi cập nhật Firestore nếu dữ liệu đã chuẩn hóa không thay đổi. Nếu tên Auth đã trùng tên hồ sơ thì không gọi `updateDisplayName`. Nếu đã có chênh lệch tên giữa Auth/Firestore, form cho phép chủ động Lưu để đồng bộ.
+
+Thứ tự lưu: transaction Firestore trước, sau đó đồng bộ displayName qua AuthService với kiểm tra đúng UID. Nếu database lỗi, không cập nhật Auth. Nếu Firestore thành công nhưng Auth lỗi, form ở lại và thông báo rõ **hồ sơ đã lưu, tên tài khoản chưa đồng bộ**; không báo thành công toàn bộ. Nút Lưu/thử đồng bộ lại chỉ gọi lại phần Auth khi thông tin đã lưu không đổi. Nếu rời ở trạng thái này, dữ liệu hồ sơ vẫn được giữ và có thể mở Edit để thử đồng bộ. Firestore là nguồn chính cho tên/cửa hàng trên Profile và Dashboard nên cập nhật ngay qua stream, không cần đăng nhập lại. Hai hệ thống không có transaction chung; không cố rollback dữ liệu đã lưu thành công.
+
+### Đổi mật khẩu
+
+Chỉ tài khoản có provider Email/Password mới thấy mục **Đổi mật khẩu**. Tài khoản Google-only không được hiển thị form mật khẩu chưa phù hợp. Nhập mật khẩu hiện tại, mật khẩu mới và xác nhận; có nút hiện/ẩn. Không trim mật khẩu. Chặn trống, mật khẩu mới dưới 6 ký tự, trùng mật khẩu hiện tại hoặc xác nhận không khớp.
+
+AuthService kiểm tra chính sách mật khẩu đang cấu hình của Firebase bằng SDK đã cài, sau đó re-authenticate bằng credential email/password và gọi `updatePassword`, theo [cơ chế Firebase](https://firebase.google.com/docs/auth/flutter/manage-users). Kiểm tra UID trước và sau các bước bất đồng bộ để không cập nhật nhầm tài khoản khi phiên thay đổi. Lỗi mật khẩu hiện tại, policy, session, mạng và yêu cầu đăng nhập lại được hiển thị trên form. Controllers mật khẩu được xóa sau kết quả thành công/thất bại và dispose khi rời màn hình. Không thêm cơ chế hash, backend hoặc lưu password riêng.
+
+### Logout và theme
+
+Nhấn **Đăng xuất → Xác nhận đăng xuất**. AuthService hiện có kết thúc phiên Firebase; Google cleanup lỗi thông thường không ngăn kết thúc phiên Firebase. AuthGate nhận session null và gỡ toàn bộ navigator của phiên đăng nhập, dispose màn hình/controller và hủy các subscription; Back không khôi phục màn hình bảo vệ. Đăng nhập UID khác tạo navigator và các service theo UID mới. Không xóa sản phẩm/giao dịch hoặc gọi xóa dữ liệu Firestore. Cache trên đĩa do Firebase SDK quản lý không bị purge; ứng dụng không dùng dữ liệu của UID cũ làm dữ liệu hồ sơ/kho của UID mới.
+
+Theme giữ Light/Dark theo hệ thống bằng ThemeData hiện có. Chưa bổ sung bộ chọn theme hoặc lưu thiết lập theme local trong đợt này; không hiển thị nút tính năng chưa có. Không triển khai multi-store hoặc role management.
+
+### Rules, file thay đổi và kiểm thử
+
+**Phải Publish Rules cập nhật trước khi lưu hồ sơ trên Firebase thật.** `firestore.rules` và `firestore.merged.rules` mở rộng đúng document hồ sơ cho phone/address/timestamps, chỉ owner đọc/ghi; từ chối email/password ngoài schema, kiểm tra định dạng/độ dài và bảo toàn `createdAt`. Nếu dùng chung Firebase với SnapLearn, đối chiếu bản gộp với Rules đang chạy trước khi Publish. Rules chỉ được sửa trong source, chưa deploy.
+
+| Loại | File |
+| --- | --- |
+| Mới | `lib/models/store_profile.dart` |
+| Mới | `lib/screens/edit_profile_screen.dart`, `lib/screens/change_password_screen.dart` |
+| Mới | `test/store_profile_service_test.dart`, `test/profile_auth_service_test.dart`, `test/profile_management_test.dart` |
+| Sửa | `lib/screens/profile_screen.dart`, `lib/screens/stock_shell.dart` |
+| Sửa | `lib/services/store_profile_service.dart`, `lib/services/auth_service.dart` |
+| Sửa | `firestore.rules`, `firestore.merged.rules` |
+| Sửa | `test/auth_screen_test.dart`, `test/dashboard_navigation_test.dart`, `test/firestore_inventory_rules_test.mjs` |
+| Sửa | `README.md` |
+
+Login/Register/Google Sign-In vẫn dùng các luồng cũ; AuthService chỉ thêm thao tác hồ sơ/mật khẩu và xử lý cleanup Logout liên quan. Không đổi dependency, Product IDs, dữ liệu kho, REST API hoặc Reports. Các kiểm thử dùng account/password fixture trong bộ nhớ; không chứa mật khẩu thật hoặc gọi đổi mật khẩu tài khoản thật.
+
+Kiểm thử bổ sung: đọc hồ sơ cũ, chuẩn hóa và validation, cập nhật đúng UID, giữ timestamp/dữ liệu kho, bỏ qua lưu khi không đổi, lỗi database, lưu một phần/retry Auth, kiểm tra password policy → reauth → update, current password sai, provider Google-only, session đổi UID, xóa controller password, xác nhận logout, Back sau logout, đăng nhập user khác, cập nhật Profile/Dashboard tức thời và màn hình 360×800. Emulator kiểm tra hai bộ Rules bằng project demo, gồm profile cũ/mới, đọc/ghi khác UID, trường bị cấm, validation và timestamp cùng các kiểm tra kho/currency trước đó.
+
+Chưa chạy bản cập nhật trên Android hoặc thử đổi mật khẩu với Firebase Auth thật. Sau khi áp dụng Rules, cần kiểm tra: sửa hồ sơ và xem Dashboard; đóng/mở lại app để đối chiếu dữ liệu; dùng tài khoản Email/Password thử mật khẩu hiện tại đúng/sai; thử mất mạng; logout rồi Back và đăng nhập tài khoản thứ hai. Đổi mật khẩu/Auth API hiện được kiểm tra qua SDK test doubles; tính quyền ghi hồ sơ được kiểm tra thực trên Firestore Emulator.
+
+Kết quả cuối đợt Profile: **71 Flutter test đạt**, `flutter analyze --no-pub` báo **No issues found**, đã chạy `dart format .` cho 48 file Dart. Hai bộ Rules được kiểm tra riêng trên Emulator, **83 assertions mỗi bộ, tổng 166**. Trình chạy test giới hạn heap/CPU Java, kiểm tra cổng trống, có timeout cho readiness/request và cleanup khi kết thúc; có thể chỉ định một bộ bằng `node test/firestore_inventory_rules_test.mjs firestore.rules` hoặc `firestore.merged.rules`. Lượt chạy đồng thời ban đầu từng timeout khởi động bản gộp khi máy chậm; lượt xác minh riêng cuối đã đạt.

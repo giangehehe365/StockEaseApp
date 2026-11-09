@@ -16,6 +16,10 @@ import 'package:stockease/screens/inventory/inventory_history_screen.dart';
 import 'package:stockease/screens/inventory/stock_movement_screen.dart';
 import 'package:stockease/screens/inventory/inventory_reports_screen.dart';
 import 'package:stockease/widgets/stock_movement_chart.dart';
+import 'package:stockease/screens/edit_profile_screen.dart';
+
+import 'inventory_service_test.dart' show MemoryTransaction;
+
 import 'package:stockease/services/auth_service.dart';
 import 'package:stockease/services/product_service.dart';
 import 'package:stockease/services/inventory_service.dart';
@@ -26,6 +30,24 @@ class NavigationFirestore extends Fake implements FirebaseFirestore {
   final documents = <String, Map<String, dynamic>>{};
   final changes = StreamController<void>.broadcast();
   final paths = <String>[];
+  @override
+  Future<T> runTransaction<T>(
+    TransactionHandler<T> handler, {
+    Duration timeout = const Duration(seconds: 30),
+    int maxAttempts = 5,
+  }) async {
+    final transaction = MemoryTransaction(documents);
+    final result = await handler(transaction);
+    for (final entry in transaction.writes.entries) {
+      documents[entry.key] = {
+        for (final field in entry.value.entries)
+          field.key: field.value is FieldValue ? Timestamp.now() : field.value,
+      };
+    }
+    publish();
+    return result;
+  }
+
   @override
   CollectionReference<Map<String, dynamic>> collection(String path) =>
       NavigationCollection(this, path);
@@ -128,7 +150,16 @@ class NavigationQuerySnapshot extends Fake
   final List<QueryDocumentSnapshot<Map<String, dynamic>>> docs;
 }
 
-class NavigationAuth extends Fake implements AuthService {}
+class NavigationAuth extends Fake implements AuthService {
+  @override
+  bool get canChangePassword => false;
+  @override
+  String? displayName = 'Chủ kho';
+  @override
+  Future<void> syncDisplayName(String uid, String name) async {
+    displayName = name;
+  }
+}
 
 class PendingProducts extends Fake implements ProductService {
   final stream = StreamController<List<Product>>.broadcast();
@@ -240,6 +271,41 @@ void main() {
 
   Finder stat(String label) => find.byWidgetPredicate(
     (widget) => widget is StatCard && widget.label == label,
+  );
+
+  testWidgets(
+    'editing profile refreshes the Profile and Dashboard store without another sign-in',
+    (tester) async {
+      await mount(tester);
+      await tester.tap(find.text('Hồ sơ'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Chỉnh sửa hồ sơ'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Họ và tên'),
+        'Tên mới',
+      );
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Tên cửa hàng'),
+        'Kho cập nhật',
+      );
+      await tester.enterText(
+        find.widgetWithText(TextFormField, 'Số điện thoại (không bắt buộc)'),
+        '0901234567',
+      );
+      await tester.ensureVisible(find.text('Lưu hồ sơ'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Lưu hồ sơ'));
+      await tester.pumpAndSettle();
+      expect(find.byType(EditProfileScreen), findsNothing);
+      expect(find.text('Kho cập nhật'), findsWidgets);
+      await tester.tap(find.byIcon(Icons.home_outlined));
+      await tester.pumpAndSettle();
+      expect(find.text('Kho cập nhật'), findsOneWidget);
+      expect(find.text('Xin chào, Tên mới'), findsOneWidget);
+      expect(db.documents['users/owner/products/healthy']!['quantity'], 10);
+      expect(db.documents['users/owner/stockMovements/IN']!['quantity'], 1);
+    },
   );
   Future<void> openStat(WidgetTester tester, String label) async {
     await tester.scrollUntilVisible(
@@ -601,6 +667,8 @@ void main() {
         250,
         scrollable: dashboardScroll,
       );
+      await tester.ensureVisible(find.text('Coca-Cola'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('Coca-Cola'));
       await tester.pumpAndSettle();
       expect(

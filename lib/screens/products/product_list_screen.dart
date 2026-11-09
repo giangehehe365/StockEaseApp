@@ -11,6 +11,7 @@ import '../../widgets/product_card.dart';
 import '../inventory/stock_movement_screen.dart';
 import 'product_details_screen.dart';
 import 'product_form_screen.dart';
+import '../barcode/barcode_lookup_screen.dart';
 
 class ProductListScreen extends StatefulWidget {
   const ProductListScreen({
@@ -49,6 +50,25 @@ class _ProductListScreenState extends State<ProductListScreen> {
       ? widget.service.watchProducts()
       : null;
   bool _deleting = false;
+  bool _scanning = false;
+
+  Future<void> _scan() async {
+    if (_scanning) return;
+    setState(() => _scanning = true);
+    final product = await pickProductByBarcode(context, widget.service);
+    if (!mounted) return;
+    setState(() => _scanning = false);
+    if (product == null) return;
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (_) => ProductDetailsScreen(
+          service: widget.service,
+          inventory: widget.inventory,
+          productId: product.id,
+        ),
+      ),
+    );
+  }
 
   @override
   void dispose() {
@@ -243,6 +263,12 @@ class _ProductListScreenState extends State<ProductListScreen> {
                 ),
         ),
         onChanged: (_) => setState(() {}),
+      ),
+      const SizedBox(height: 12),
+      OutlinedButton.icon(
+        onPressed: _scanning ? null : _scan,
+        icon: const Icon(Icons.barcode_reader),
+        label: const Text('Scan Barcode'),
       ),
       const SizedBox(height: 12),
       Wrap(

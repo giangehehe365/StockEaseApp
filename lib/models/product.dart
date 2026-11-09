@@ -8,6 +8,7 @@ class Product {
 
   Product.fromData(this.id, Map<String, dynamic> data)
     : userId = data['userId'] as String,
+      barcode = data['barcode'] as String? ?? '',
       name = data['name'] as String,
       sku = data['sku'] as String,
       category = data['category'] as String,
@@ -23,6 +24,7 @@ class Product {
 
   final String id;
   final String userId;
+  final String barcode;
   final String name;
   final String sku;
   final String category;

@@ -19,6 +19,7 @@ class SampleProductRepository extends Fake implements ProductService {
     required String unit,
     int? quantity,
     PurchasePrice? purchasePrice,
+    String? barcode,
   }) async {
     if (names.containsKey(sku)) throw const DuplicateSkuException();
     names[sku] = name;

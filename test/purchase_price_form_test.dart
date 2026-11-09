@@ -28,6 +28,7 @@ class CurrencyProducts extends Fake implements ProductService {
     required String unit,
     int? quantity,
     PurchasePrice? purchasePrice,
+    String? barcode,
   }) async {
     calls++;
     saved = purchasePrice;

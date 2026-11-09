@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import '../../models/product.dart';
 import '../../models/stock_movement.dart';
 import '../../theme/stock_theme.dart';
+import '../../services/product_service.dart';
+import '../barcode/barcode_lookup_screen.dart';
 
 /// Receives the current user's active products from ProductService.
 class ProductSelectionSheet extends StatefulWidget {
@@ -10,10 +12,12 @@ class ProductSelectionSheet extends StatefulWidget {
     super.key,
     required this.products,
     required this.type,
+    this.service,
   });
 
   final List<Product> products;
   final StockMovementType type;
+  final ProductService? service;
 
   @override
   State<ProductSelectionSheet> createState() => _ProductSelectionSheetState();
@@ -22,6 +26,17 @@ class ProductSelectionSheet extends StatefulWidget {
 class _ProductSelectionSheetState extends State<ProductSelectionSheet> {
   final _search = TextEditingController();
   bool _inStockOnly = false;
+  bool _scanning = false;
+
+  Future<void> _scan() async {
+    if (_scanning || widget.service == null) return;
+    setState(() => _scanning = true);
+    FocusScope.of(context).unfocus();
+    final product = await pickProductByBarcode(context, widget.service!);
+    if (!mounted) return;
+    setState(() => _scanning = false);
+    if (product != null) Navigator.pop(context, product);
+  }
 
   @override
   void dispose() {
@@ -56,20 +71,32 @@ class _ProductSelectionSheetState extends State<ProductSelectionSheet> {
                   style: Theme.of(context).textTheme.titleLarge,
                 ),
                 const SizedBox(height: 16),
-                TextField(
-                  controller: _search,
-                  onChanged: (_) => setState(() {}),
-                  decoration: InputDecoration(
-                    labelText: 'Tìm tên sản phẩm hoặc SKU',
-                    prefixIcon: const Icon(Icons.search),
-                    suffixIcon: _search.text.isEmpty
-                        ? null
-                        : IconButton(
-                            tooltip: 'Xóa từ khóa',
-                            onPressed: () => setState(_search.clear),
-                            icon: const Icon(Icons.close),
-                          ),
-                  ),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _search,
+                        onChanged: (_) => setState(() {}),
+                        decoration: InputDecoration(
+                          labelText: 'Tìm tên sản phẩm hoặc SKU',
+                          prefixIcon: const Icon(Icons.search),
+                          suffixIcon: _search.text.isEmpty
+                              ? null
+                              : IconButton(
+                                  tooltip: 'Xóa từ khóa',
+                                  onPressed: () => setState(_search.clear),
+                                  icon: const Icon(Icons.close),
+                                ),
+                        ),
+                      ),
+                    ),
+                    if (widget.service != null)
+                      IconButton(
+                        tooltip: 'Scan Barcode',
+                        onPressed: _scanning ? null : _scan,
+                        icon: const Icon(Icons.barcode_reader),
+                      ),
+                  ],
                 ),
                 const SizedBox(height: 8),
                 Wrap(

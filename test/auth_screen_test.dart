@@ -6,8 +6,11 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:stockease/main.dart';
 import 'package:stockease/screens/auth/auth_screen.dart';
 import 'package:stockease/services/auth_service.dart';
+import 'package:stockease/screens/profile_screen.dart';
 
 class RecordingAuthService extends Fake implements AuthService {
+  @override
+  bool get canChangePassword => false;
   final session = StreamController<User?>();
   String? email;
   String? password;
@@ -34,6 +37,13 @@ class SignedInUser extends Fake implements User {
 
   @override
   String get email => 'owner@example.com';
+}
+
+class AnotherSignedInUser extends SignedInUser {
+  @override
+  String get uid => 'another-test-user';
+  @override
+  String get email => 'another@example.com';
 }
 
 void main() {
@@ -76,12 +86,35 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Hồ sơ'));
     await tester.pumpAndSettle();
-    expect(find.text('owner@example.com'), findsOneWidget);
+    expect(find.text('owner@example.com'), findsWidgets);
     expect(find.byType(AuthScreen), findsNothing);
 
+    await tester.scrollUntilVisible(
+      find.text('Đăng xuất'),
+      250,
+      scrollable: find
+          .descendant(
+            of: find.byType(ProfileScreen),
+            matching: find.byType(Scrollable),
+          )
+          .first,
+    );
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Đăng xuất'));
     await tester.pumpAndSettle();
+    expect(find.text('Đăng xuất?'), findsOneWidget);
+    await tester.tap(find.text('Xác nhận đăng xuất'));
+    await tester.pumpAndSettle();
     expect(find.byType(AuthScreen), findsOneWidget);
+    expect(find.text('owner@example.com'), findsNothing);
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+    expect(find.byType(AuthScreen), findsOneWidget);
+    auth.session.add(AnotherSignedInUser());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Hồ sơ'));
+    await tester.pumpAndSettle();
+    expect(find.text('another@example.com'), findsWidgets);
     expect(find.text('owner@example.com'), findsNothing);
   });
 }

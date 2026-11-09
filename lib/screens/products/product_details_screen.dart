@@ -121,6 +121,12 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                     child: Column(
                       children: [
                         _ProductField('SKU', product.sku),
+                        _ProductField(
+                          'Barcode',
+                          product.barcode.isEmpty
+                              ? 'Chưa khai báo'
+                              : product.barcode,
+                        ),
                         _ProductField('Danh mục', product.category),
                         _ProductField('Giá bán', product.formattedPrice),
                         _ProductField(

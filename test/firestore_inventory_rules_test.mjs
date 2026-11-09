@@ -4,11 +4,20 @@ import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
 import { resolve } from 'node:path';
+import { createServer } from 'node:net';
+import { createHash } from 'node:crypto';
 
 const jar = process.env.FIRESTORE_EMULATOR_JAR;
 assert(jar, 'Set FIRESTORE_EMULATOR_JAR to the cached Firestore emulator JAR.');
 const java = process.env.FIRESTORE_JAVA || 'java';
-const port = Number(process.env.FIRESTORE_TEST_PORT || 8187);
+// Reserve an available local port before starting; never reuse another emulator.
+const probe = createServer();
+await new Promise((ready, reject) => {
+  probe.once('error', reject);
+  probe.listen(Number(process.env.FIRESTORE_TEST_PORT || 0), '127.0.0.1', ready);
+});
+const port = probe.address().port;
+await new Promise(ready => probe.close(ready));
 const project = 'demo-stockease-inventory';
 const root = `http://127.0.0.1:${port}/v1/projects/${project}/databases/(default)/documents`;
 const prefix = `projects/${project}/databases/(default)/documents`;
@@ -29,6 +38,7 @@ const jwt = uid => {
 };
 async function request(path, { method = 'GET', body, user = 'owner', admin = false } = {}) {
   const response = await fetch(`${root}${path}`, {
+    signal: AbortSignal.timeout(15000),
     method,
     headers: {
       'content-type': 'application/json',
@@ -70,21 +80,27 @@ async function verifyAbsent(id) {
   await expectStatus(await request(`/users/owner/stockMovements/${id}`, { admin: true }), 404);
 }
 
-for (const rules of ['firestore.rules', 'firestore.merged.rules']) {
+const selectedRules = process.argv.slice(2);
+const rulesFiles = selectedRules.length ? selectedRules : ['firestore.rules', 'firestore.merged.rules'];
+assert(rulesFiles.every(file => ['firestore.rules', 'firestore.merged.rules'].includes(file)), 'Choose a project Rules file.');
+for (const rules of rulesFiles) {
   let logs = '';
-  const child = spawn(java, ['-jar', jar, '--host', '127.0.0.1', '--port', String(port),
+  const child = spawn(java, ['-Xmx512m', '-XX:ActiveProcessorCount=2', '-Dio.netty.eventLoopThreads=2', '-jar', jar, '--host', '127.0.0.1', '--port', String(port),
     '--project_id', project, '--rules', resolve(rules)], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   child.stdout.on('data', chunk => { logs += chunk; });
   child.stderr.on('data', chunk => { logs += chunk; });
   child.on('error', error => { logs += error.message; });
+  const stop = () => { child.kill(); process.exitCode = 130; };
+  process.once('SIGINT', stop);
   try {
     let ready = false;
-    for (let attempt = 0; attempt < 100; attempt++) {
+    for (let attempt = 0; attempt < 300; attempt++) {
       if (child.exitCode != null) break;
-      try { await fetch(`http://127.0.0.1:${port}/`); ready = true; break; } catch {}
+      try { await fetch(`http://127.0.0.1:${port}/`, { signal: AbortSignal.timeout(1000) }); ready = true; break; } catch {}
       await delay(200);
     }
     assert(ready, `Emulator did not start: ${logs}`);
+    console.log(`Started emulator for ${rules}`);
     const seed = {
       userId: s('owner'), name: s('Coca-Cola'), sku: s('BV001'), category: s('Đồ uống'),
       price: n(10000), quantity: n(10), minStock: n(2), unit: s('box'),
@@ -203,11 +219,128 @@ for (const rules of ['firestore.rules', 'firestore.merged.rules']) {
     await expectStatus(await commit([stockWrite(13, archived), movementWrite(archived, 'IN', 1, past)]), 403);
     await verifyStock(12);
     await verifyAbsent(archived);
-    console.log(`PASS ${rules}: inventory atomicity, ownership, legacy reads, purchase CRUD/rounding and stock preservation`);
+    // Profile data remains on its existing document, and never contains credentials.
+    const profilePath = 'users/owner/stockease/profile';
+    await expectStatus(await request(`/${profilePath}`, { method: 'PATCH', admin: true, body: { fields: {
+      name: s('Legacy owner'), storeName: s('Legacy store'),
+    } } }), 200);
+    await expectStatus(await request(`/${profilePath}`), 200);
+    await expectStatus(await request(`/${profilePath}`, { user: 'other' }), 403);
+    await expectStatus(await request(`/${profilePath}`, { user: null }), 403);
+    const profileFields = { name: s('Updated owner'), storeName: s('Updated store'), phoneNumber: s('+84901234567'), storeAddress: s('123 Test Street') };
+    const profileWrite = (fields, created = false, path = profilePath) => ({
+      update: { name: `${prefix}/${path}`, fields },
+      updateMask: { fieldPaths: Object.keys(fields) },
+      updateTransforms: [
+        ...(created ? [{ fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' }] : []),
+        { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' },
+      ],
+    });
+    await expectStatus(await commit([profileWrite({ ...profileFields, createdAt: { nullValue: null } })]), 200);
+    const profileRead = await request(`/${profilePath}`);
+    await expectStatus(profileRead, 200);
+    assert.equal(profileRead.body.fields.phoneNumber.stringValue, '+84901234567');
+    const profileCreated = profileRead.body.fields.createdAt;
+    checks++;
+    await expectStatus(await commit([profileWrite({ ...profileFields, storeName: s('Renamed store') })]), 200);
+    assert.deepEqual((await request(`/${profilePath}`)).body.fields.createdAt, profileCreated);
+    checks++;
+    for (const invalid of [
+      { ...profileFields, name: s('') }, { ...profileFields, storeName: s('') },
+      { ...profileFields, phoneNumber: s('abc') }, { ...profileFields, password: s('must-never-be-stored') },
+      { ...profileFields, email: s('cannot-change-login@example.com') },
+    ]) await expectStatus(await commit([profileWrite(invalid)]), 403);
+    await expectStatus(await commit([profileWrite(profileFields)], { user: 'other' }), 403);
+    await expectStatus(await commit([profileWrite(profileFields, true)]), 403);
+    await expectStatus(await commit([profileWrite(profileFields, true, 'users/fresh/stockease/profile')], { user: 'fresh' }), 200);
+    await expectStatus(await request('/users/fresh/stockease/profile', { user: 'fresh' }), 200);
+    // Barcode uniqueness must hold in Rules as well as in the Flutter service.
+    const barcodeKey = code => createHash('sha256').update(/^[0-9]{12}$/.test(code) ? `0${code}` : code).digest('hex');
+    const barcodePath = (uid, code) => `users/${uid}/productBarcodes/${barcodeKey(code)}`;
+    const barcodeReservation = (uid, id, code, key = barcodeKey(code)) => ({
+      update: { name: `${prefix}/users/${uid}/productBarcodes/${key}`, fields: { productId: s(id), barcode: s(code) } },
+    });
+    const barcodeProduct = (uid, id, sku, code) => ({
+      update: { name: `${prefix}/users/${uid}/products/${id}`, fields: {
+        ...seed, userId: s(uid), sku: s(sku), barcode: code,
+      } },
+      updateTransforms: [{ fieldPath: 'createdAt', setToServerValue: 'REQUEST_TIME' }, { fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' }],
+    });
+    const skuWrite = (uid, id, sku) => ({ update: { name: `${prefix}/users/${uid}/productSkus/${sku}`, fields: { productId: s(id) } } });
+    const newBarcodeProduct = (uid, id, sku, code) => [barcodeProduct(uid,id,sku,s(code)), skuWrite(uid,id,sku), barcodeReservation(uid,id,code)];
+    const barcodeEdit = (id, code) => ({
+      update: { name: `${prefix}/users/owner/products/${id}`, fields: { barcode: s(code) } },
+      updateMask: { fieldPaths: ['barcode'] },
+      updateTransforms: [{ fieldPath: 'updatedAt', setToServerValue: 'REQUEST_TIME' }],
+    });
+    const code = '0012345678905';
+    await expectStatus(await commit(newBarcodeProduct('owner', 'barcode1', 'BAR1', code)), 200);
+    const barcodeRead = await request('/users/owner/products/barcode1');
+    await expectStatus(barcodeRead, 200);
+    assert.equal(barcodeRead.body.fields.barcode.stringValue, code); checks++;
+    await expectStatus(await request(`/${barcodePath('owner',code)}`), 200);
+    await expectStatus(await request(`/${barcodePath('owner',code)}`, { user: 'other' }), 403);
+    await expectStatus(await request('/users/owner/products/barcode1', { user: 'other' }), 403);
+    await expectStatus(await commit(newBarcodeProduct('owner', 'barcode2', 'BAR2', code)), 403);
+    await expectStatus(await commit(newBarcodeProduct('other', 'barcode1', 'BAR1', code), { user: 'other' }), 200);
+    await expectStatus(await commit([barcodeProduct('owner','numeric','NUM',n(123)), skuWrite('owner','numeric','NUM')]), 403);
+    await expectStatus(await commit([barcodeProduct('owner','missing','MISS',s('not-reserved')), skuWrite('owner','missing','MISS')]), 403);
+    await expectStatus(await commit([barcodeReservation('owner','barcode1',code,'wrong-key')]), 403);
+    // Changing barcode must release the old reservation and reserve the new one.
+    const code128 = 'Ab/Code-128';
+    await expectStatus(await commit([barcodeEdit('barcode1',code128), barcodeReservation('owner','barcode1',code128)]), 403);
+    await expectStatus(await commit([
+      barcodeEdit('barcode1',code128), barcodeReservation('owner','barcode1',code128),
+      { delete: `${prefix}/${barcodePath('owner',code)}` },
+    ]), 200);
+    await expectStatus(await commit(newBarcodeProduct('owner', 'barcode2', 'BAR2', code)), 200);
+    await expectStatus(await commit([barcodeEdit('barcode1','')]), 403);
+    await expectStatus(await commit([barcodeEdit('barcode1',''), { delete: `${prefix}/${barcodePath('owner',code128)}` }]), 200);
+    // Barcode can be attached to a pre-existing legacy product without a migration.
+    const legacyBarcodeEdit = { ...barcodeEdit('purchase','00000001') };
+    await expectStatus(await commit([legacyBarcodeEdit, barcodeReservation('owner','purchase','00000001')]), 200);
+    // Two simultaneous different products cannot claim one barcode.
+    const races = await Promise.all([
+      commit(newBarcodeProduct('owner', 'race1', 'RACE1', 'RACE/128')),
+      commit(newBarcodeProduct('owner', 'race2', 'RACE2', 'RACE/128')),
+    ]);
+    assert.deepEqual(races.map(r=>r.status).sort(), [200,403]); checks++;
+    // Archiving must release both indices while retaining the product/history.
+    const archiveBarcode = {
+      update: { name: `${prefix}/users/owner/products/barcode2`, fields: { isArchived: { booleanValue: true } } },
+      updateMask: { fieldPaths:['isArchived'] },
+      updateTransforms: [{ fieldPath:'updatedAt',setToServerValue:'REQUEST_TIME' }],
+    };
+    await expectStatus(await commit([archiveBarcode,{delete:`${prefix}/users/owner/productSkus/BAR2`}]),403);
+    await expectStatus(await commit([archiveBarcode,{delete:`${prefix}/users/owner/productSkus/BAR2`},{delete:`${prefix}/${barcodePath('owner',code)}`}]),200);
+    await expectStatus(await commit(newBarcodeProduct('owner','barcode3','BAR3',code)),200);
+    await expectStatus(await commit([{ delete: `${prefix}/${barcodePath('owner',code)}` }]),403);
+    await expectStatus(await commit(newBarcodeProduct('owner','upc','UPC','036000291452')),200);
+    await expectStatus(await commit(newBarcodeProduct('owner','eanAlias','EALIAS','0036000291452')),403);
+    await expectStatus(await commit([barcodeEdit('upc','0036000291452'),barcodeReservation('owner','upc','0036000291452')]),200);
+    const barcodeStock = (next, id) => {
+      const write = stockWrite(next, id);
+      write.update.name = `${prefix}/users/owner/products/barcode3`;
+      return write;
+    };
+    const barcodeMovement = (id, type, amount) => {
+      const write = movementWrite(id,type,amount,past);
+      write.update.fields.productId=s('barcode3'); write.update.fields.sku=s('BAR3');
+      return write;
+    };
+    await expectStatus(await commit([barcodeStock(14,'K'.repeat(20)),barcodeMovement('K'.repeat(20),'IN',4)]),200);
+    await expectStatus(await commit([barcodeStock(11,'L'.repeat(20)),barcodeMovement('L'.repeat(20),'OUT',3)]),200);
+    await expectStatus(await commit([barcodeStock(-1,'M'.repeat(20)),barcodeMovement('M'.repeat(20),'OUT',12)]),403);
+    const barcodeAfterStock=await request('/users/owner/products/barcode3');
+    await expectStatus(barcodeAfterStock,200);
+    assert.equal(barcodeAfterStock.body.fields.quantity.integerValue,'11');
+    assert.equal(barcodeAfterStock.body.fields.barcode.stringValue,code); checks+=2;
+    console.log(`PASS ${rules}: inventory, purchase prices, profile and barcode uniqueness/legacy/ownership/races`);
   } catch (error) {
     console.error(logs.slice(-6000));
     throw error;
   } finally {
+    process.removeListener('SIGINT', stop);
     child.kill();
     await new Promise(resolveExit => child.exitCode != null ? resolveExit() : child.once('exit', resolveExit));
   }

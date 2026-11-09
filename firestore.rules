@@ -13,6 +13,18 @@ service cloud.firestore {
       return /databases/$(database)/documents/users/$(uid)/productSkus/$(sku);
     }
 
+    function validBarcode(code) {
+      return code is string && code.size() <= 128
+        && (code == '' || code.matches('^[ -~]+$'));
+    }
+
+    function barcodeIdentity(code) {
+      return code.matches('^[0-9]{12}$') ? '0' + code : code;
+    }
+    function barcodePath(uid, code) {
+      return /databases/$(database)/documents/users/$(uid)/productBarcodes/$(hashing.sha256(barcodeIdentity(code)).toHexString().lower());
+    }
+
     function validSku(sku) {
       return sku is string && sku.matches('^[A-Z0-9_-]{1,40}$')
         && !sku.matches('^__.*__$');
@@ -43,7 +55,7 @@ service cloud.firestore {
     function validProduct(data, uid) {
       return data.keys().hasOnly([
           'userId', 'name', 'sku', 'category', 'price', 'quantity', 'minStock',
-          'unit', 'createdAt', 'updatedAt', 'isArchived', 'lastMovementId',
+          'unit', 'createdAt', 'updatedAt', 'isArchived', 'lastMovementId', 'barcode',
           'purchasePriceVnd', 'purchasePriceOriginal', 'purchaseCurrency', 'exchangeRate', 'exchangeRateDate'
         ])
         && data.userId == uid
@@ -54,19 +66,25 @@ service cloud.firestore {
         && validNumber(data.minStock)
         && data.unit in ['piece', 'box', 'bottle', 'can', 'pack', 'kg']
         && data.createdAt is timestamp && data.updatedAt == request.time
-        && data.isArchived is bool && validPurchase(data);
+        && data.isArchived is bool && validPurchase(data)
+        && validBarcode(data.get('barcode', ''));
     }
 
     match /users/{uid}/stockease/profile {
+      function validProfile() {
+        let data = request.resource.data;
+        return data.keys().hasOnly(['name', 'storeName', 'phoneNumber', 'storeAddress', 'createdAt', 'updatedAt'])
+          && data.name is string && data.name.size() > 0 && data.name.size() <= 80
+          && data.storeName is string && data.storeName.size() > 0 && data.storeName.size() <= 80
+          && data.phoneNumber is string
+          && (data.phoneNumber == '' || data.phoneNumber.matches('^[+]?[0-9]{7,15}$'))
+          && data.storeAddress is string && data.storeAddress.size() <= 200
+          && (data.createdAt == null || data.createdAt is timestamp) && data.updatedAt == request.time;
+      }
       allow read: if isOwner(uid);
-      allow create, update: if isOwner(uid)
-        && request.resource.data.keys().hasOnly(['name', 'storeName'])
-        && request.resource.data.name is string
-        && request.resource.data.name.size() > 0
-        && request.resource.data.name.size() <= 80
-        && request.resource.data.storeName is string
-        && request.resource.data.storeName.size() > 0
-        && request.resource.data.storeName.size() <= 80;
+      allow create: if isOwner(uid) && validProfile() && request.resource.data.createdAt == request.time;
+      allow update: if isOwner(uid) && validProfile()
+        && request.resource.data.createdAt == resource.data.get('createdAt', null);
     }
 
     function movementPath(uid, id) {
@@ -130,6 +148,17 @@ service cloud.firestore {
         return !existsAfter(skuPath(uid, resource.data.sku));
       }
 
+      function holdsBarcode() {
+        let code = nextProduct().get('barcode', '');
+        return code == '' || (getAfter(barcodePath(uid, code)).data.productId == id
+          && getAfter(barcodePath(uid, code)).data.barcode == code);
+      }
+
+      function releasedPreviousBarcode() {
+        let code = resource.data.get('barcode', '');
+        return code == '' || !existsAfter(barcodePath(uid, code));
+      }
+
       function pairedMovement(movementId) {
         let path = movementPath(uid, movementId);
         return !exists(path)
@@ -143,30 +172,57 @@ service cloud.firestore {
       allow create: if isOwner(uid) && validProduct(nextProduct(), uid)
         && !nextProduct().keys().hasAny(['lastMovementId'])
         && nextProduct().isArchived == false
-        && nextProduct().createdAt == request.time && holdsSku(nextProduct().sku);
+        && nextProduct().createdAt == request.time && holdsSku(nextProduct().sku)
+        && holdsBarcode();
       allow update: if isOwner(uid) && validProduct(nextProduct(), uid)
         && resource.data.isArchived == false
         && (
           (
             nextProduct().isArchived == false
             && nextProduct().diff(resource.data).affectedKeys().hasOnly([
-              'name', 'sku', 'category', 'price', 'minStock', 'unit', 'updatedAt',
+              'name', 'sku', 'category', 'price', 'minStock', 'unit', 'updatedAt', 'barcode',
               'purchasePriceVnd', 'purchasePriceOriginal', 'purchaseCurrency', 'exchangeRate', 'exchangeRateDate'
             ])
             && holdsSku(nextProduct().sku)
             && (nextProduct().sku == resource.data.sku || releasedPreviousSku())
+            && holdsBarcode()
+            && (barcodeIdentity(nextProduct().get('barcode', '')) == barcodeIdentity(resource.data.get('barcode', '')) || releasedPreviousBarcode())
           ) || (
             nextProduct().isArchived == true
             && nextProduct().diff(resource.data).affectedKeys().hasOnly([
               'isArchived', 'updatedAt'
             ])
             && releasedPreviousSku()
+            && releasedPreviousBarcode()
           ) || (
             nextProduct().get('lastMovementId', '') is string
             && nextProduct().get('lastMovementId', '').matches('^[A-Za-z0-9]{20}$')
             && pairedMovement(nextProduct().lastMovementId)
           )
         );
+    }
+
+    match /users/{uid}/productBarcodes/{key} {
+      function reservedProduct() {
+        return getAfter(productPath(uid, request.resource.data.productId)).data;
+      }
+      function previousProduct() {
+        return getAfter(productPath(uid, resource.data.productId)).data;
+      }
+      allow get: if isOwner(uid);
+      function validReservation() {
+        return request.resource.data.keys().hasOnly(['productId', 'barcode'])
+          && request.resource.data.productId is string
+          && validBarcode(request.resource.data.barcode) && request.resource.data.barcode != ''
+          && key == hashing.sha256(barcodeIdentity(request.resource.data.barcode)).toHexString().lower()
+          && reservedProduct().userId == uid && reservedProduct().isArchived == false
+          && reservedProduct().get('barcode', '') == request.resource.data.barcode;
+      }
+      allow create: if isOwner(uid) && validReservation();
+      allow update: if isOwner(uid) && validReservation()
+        && request.resource.data.productId == resource.data.productId;
+      allow delete: if isOwner(uid) && previousProduct().userId == uid
+        && (previousProduct().get('barcode', '') != resource.data.barcode || previousProduct().isArchived == true);
     }
 
     match /users/{uid}/productSkus/{sku} {
@@ -189,5 +245,7 @@ service cloud.firestore {
     }
   }
 }
+
+
 
 

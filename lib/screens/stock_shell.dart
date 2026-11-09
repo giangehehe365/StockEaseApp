@@ -17,6 +17,7 @@ import 'products/product_details_screen.dart';
 import 'products/product_form_screen.dart';
 import 'products/product_list_screen.dart';
 import 'profile_screen.dart';
+import 'barcode/barcode_lookup_screen.dart';
 
 class StockShell extends StatefulWidget {
   const StockShell({
@@ -49,9 +50,21 @@ class _StockShellState extends State<StockShell> {
       ? null
       : InventoryService(widget.firestore!, widget.uid);
   late var _movementStream = _inventory?.watchMovements();
-  late final _profileStream = _profiles?.watch();
+  late var _profileStream = _profiles?.watch();
   late var _productStream = _products?.watchProducts();
   int _tab = 0;
+  bool _scanning = false;
+
+  Future<void> _scan() async {
+    if (_scanning || _products == null) return;
+    _scanning = true;
+    try {
+      final product = await pickProductByBarcode(context, _products);
+      if (mounted && product != null) _open(product);
+    } finally {
+      _scanning = false;
+    }
+  }
 
   void _select(int index) {
     FocusManager.instance.primaryFocus?.unfocus();
@@ -139,8 +152,11 @@ class _StockShellState extends State<StockShell> {
       constraints: BoxConstraints(
         maxHeight: MediaQuery.sizeOf(context).height * .9,
       ),
-      builder: (context) =>
-          ProductSelectionSheet(products: products, type: type),
+      builder: (context) => ProductSelectionSheet(
+        products: products,
+        type: type,
+        service: _products,
+      ),
     );
     if (!mounted || product == null) return;
     await _stock(product, type);
@@ -222,12 +238,7 @@ class _StockShellState extends State<StockShell> {
               final emailName = widget.email?.split('@').first.trim() ?? '';
               final profile =
                   profileSnapshot.data ??
-                  (
-                    name: displayName.isNotEmpty
-                        ? displayName
-                        : (emailName.isNotEmpty ? emailName : 'Chủ kho'),
-                    storeName: 'Kho StockEase',
-                  );
+                  StoreProfile(uid: widget.uid, name: displayName);
               return StreamBuilder<List<Product>>(
                 stream: _productStream,
                 builder: (context, snapshot) {
@@ -237,11 +248,16 @@ class _StockShellState extends State<StockShell> {
                     index: _tab,
                     children: [
                       DashboardScreen(
-                        name: profile.name,
-                        storeName: profile.storeName,
+                        name: profile.name.isNotEmpty
+                            ? profile.name
+                            : (emailName.isNotEmpty ? emailName : 'Chủ kho'),
+                        storeName: profile.storeName.isNotEmpty
+                            ? profile.storeName
+                            : 'Kho StockEase',
                         products: products,
                         onAdd: _products == null ? null : _add,
                         onProducts: () => _select(1),
+                        onScanBarcode: _products == null ? null : _scan,
                         onOpen: _open,
                         onReports: _products == null || _inventory == null
                             ? null
@@ -296,6 +312,15 @@ class _StockShellState extends State<StockShell> {
                         profiles: _profiles,
                         products: _products,
                         profileUnavailable: profileSnapshot.hasError,
+                        profileLoading:
+                            _profiles != null &&
+                            profileSnapshot.connectionState ==
+                                ConnectionState.waiting,
+                        onRetry: _profiles == null
+                            ? null
+                            : () => setState(
+                                () => _profileStream = _profiles.watch(),
+                              ),
                       ),
                     ],
                   );

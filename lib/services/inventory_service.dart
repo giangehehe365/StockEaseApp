@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import '../models/stock_movement.dart';
@@ -9,6 +11,7 @@ class InventoryService {
   final FirebaseFirestore _db;
   final String _uid;
   static const maxNoteLength = 300;
+  static const initialLoadTimeout = Duration(seconds: 15);
 
   DocumentReference<Map<String, dynamic>> get _owner =>
       _db.collection('users').doc(_uid);
@@ -22,11 +25,47 @@ class InventoryService {
     final query = productId == null
         ? _movements
         : _movements.where('productId', isEqualTo: productId);
-    return query.snapshots().map((snapshot) {
+    final movements = query.snapshots().map((snapshot) {
       return queryMovements(
         snapshot.docs.map(StockMovement.fromDocument).toList(),
       );
     });
+    // Bound the first response only. A quiet, already-loaded warehouse is not
+    // an error, and a late snapshot must still recover the UI automatically.
+    return movements.transform(
+      StreamTransformer.fromBind((events) {
+        var responded = false;
+        return events
+            .transform(
+              StreamTransformer<
+                List<StockMovement>,
+                List<StockMovement>
+              >.fromHandlers(
+                handleData: (data, sink) {
+                  responded = true;
+                  sink.add(data);
+                },
+                handleError: (error, stack, sink) {
+                  responded = true;
+                  sink.addError(error, stack);
+                },
+              ),
+            )
+            .timeout(
+              initialLoadTimeout,
+              onTimeout: (sink) {
+                if (responded) return;
+                responded = true;
+                sink.addError(
+                  const ProductException(
+                    'Tải giao dịch kho lâu hơn dự kiến. '
+                    'Hãy kiểm tra kết nối mạng và nhấn Thử lại.',
+                  ),
+                );
+              },
+            );
+      }),
+    );
   }
 
   Future<void> record({

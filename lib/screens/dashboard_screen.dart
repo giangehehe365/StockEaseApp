@@ -26,6 +26,7 @@ class DashboardScreen extends StatelessWidget {
     this.onMovementStats,
     this.onRestock,
     this.onReports,
+    this.onScanBarcode,
   });
 
   final String name;
@@ -45,9 +46,18 @@ class DashboardScreen extends StatelessWidget {
   final ValueChanged<StockMovementType>? onMovementStats;
   final ValueChanged<Product>? onRestock;
   final VoidCallback? onReports;
+  final VoidCallback? onScanBarcode;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => StreamBuilder<List<StockMovement>>(
+    stream: movements,
+    builder: (context, snapshot) => _content(context, snapshot),
+  );
+
+  Widget _content(
+    BuildContext context,
+    AsyncSnapshot<List<StockMovement>> movementSnapshot,
+  ) {
     final restock =
         products
             .where((product) => product.isLowStock || product.isOutOfStock)
@@ -123,6 +133,11 @@ class DashboardScreen extends StatelessWidget {
               onPressed: onHistory,
             ),
             ActionChip(
+              avatar: const Icon(Icons.barcode_reader),
+              label: const Text('Scan Barcode'),
+              onPressed: onScanBarcode,
+            ),
+            ActionChip(
               avatar: const Icon(Icons.assessment_outlined),
               label: const Text('Báo cáo kho'),
               onPressed: onReports,
@@ -189,9 +204,9 @@ class DashboardScreen extends StatelessWidget {
           const SizedBox(height: 24),
           Text('Giao dịch kho', style: Theme.of(context).textTheme.titleLarge),
           const SizedBox(height: 8),
-          StreamBuilder<List<StockMovement>>(
-            stream: movements,
-            builder: (context, snapshot) {
+          Builder(
+            builder: (context) {
+              final snapshot = movementSnapshot;
               if (snapshot.hasError) {
                 return Card(
                   child: ListTile(
